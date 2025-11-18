@@ -3,3 +3,5 @@ langchain-core
 langgraph
 pydantic
 tavily-python
+grandalf
+langgraph-cli[inmem]

@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "agent": "deep_researcher:agent"
+  },
+  "env": ".env"
+}
