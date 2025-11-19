@@ -97,15 +97,15 @@ def create_agent(use_checkpointer=False):
         }
     )
 
-    # Compile the graph with interrupt_before
-    # The interrupt will pause before collect_response, and user's response will be added to messages
-    # collect_response node will then extract the response from messages
+    # Compile the graph
+    # The collect_response node calls interrupt() internally to pause and wait for user input
+    # Resume happens via Command(resume=user_input) in main.py
     if use_checkpointer:
         from langgraph.checkpoint.memory import MemorySaver
         memory = MemorySaver()
-        return workflow.compile(checkpointer=memory, interrupt_before=["collect_response"])
+        return workflow.compile(checkpointer=memory)
     else:
-        return workflow.compile(interrupt_before=["collect_response"])
+        return workflow.compile()
 
 
 agent = create_agent(use_checkpointer=False)

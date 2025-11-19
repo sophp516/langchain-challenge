@@ -1,5 +1,6 @@
 from typing import TypedDict
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langgraph.types import RunnableConfig, interrupt
 from pydantic import BaseModel, create_model
 from utils.model import llm
 from utils.subresearcher import subresearcher_graph
@@ -69,12 +70,12 @@ def check_initial_context(state: dict) -> dict:
     }
 
 
-def generate_clarification_question(state: dict) -> dict:
+def generate_clarification_question(state: dict, config: RunnableConfig) -> dict:
     """
     Generate a clarification question based on current topic and previous responses.
     This node uses LLM to determine what information is still needed.
     """
-    MAX_CLARIFICATION_ROUNDS = 5  # Safety limit
+    MAX_CLARIFICATION_ROUNDS = config.get("configurable", {}).get("max_clarification_rounds", 5)
     
     clarification_rounds = state.get("clarification_rounds", 0)
     topic = state.get("topic", "")
@@ -118,10 +119,10 @@ def generate_clarification_question(state: dict) -> dict:
         SystemMessage(content="You are a helpful research assistant that asks clarifying questions to better understand research topics."),
         HumanMessage(content=clarification_prompt)
     ]
-    
+
     response = llm.invoke(messages)
     question = response.content.strip() if hasattr(response, 'content') else str(response).strip()
-    
+
     # Check if LLM says we have enough context
     if question.upper() == "ENOUGH_CONTEXT" or "enough context" in question.lower():
         print("generate_clarification_question: LLM indicated enough context")
@@ -145,169 +146,109 @@ def generate_clarification_question(state: dict) -> dict:
 def collect_user_response(state: dict) -> dict:
     """
     Collect user's response to the clarification question.
-    When using interrupt_before, the user's response is automatically added to messages.
-    This node just needs to extract it and update the topic.
+    Uses interrupt() to pause execution and wait for user input via Command(resume=...).
     """
     messages = state.get("messages", [])
     topic = state.get("topic", "")
     user_responses = state.get("user_responses", [])
 
-    print(f"collect_user_response: processing user input (current topic: '{topic[:50]}...')")
+    print(f"collect_user_response: waiting for user input (current topic: '{topic[:50]}...')")
 
-    # The last message should be the user's response (added by LangGraph Studio after interrupt)
-    if messages and len(messages) > 0:
-        last_message = messages[-1]
+    # Get the last AI message (the clarification question)
+    last_message = messages[-1] if messages else None
+    question = last_message.content if last_message else "Please provide your response"
 
-        # Check if it's a HumanMessage (user's response)
-        if isinstance(last_message, HumanMessage):
-            response = last_message.content
-            print(f"collect_user_response: found user response '{response[:50]}...'")
+    # Call interrupt() - this pauses execution and waits for Command(resume=user_input)
+    user_response = interrupt(question)
 
-            # Add response to the list
-            new_responses = user_responses + [response]
+    print(f"collect_user_response: received user response '{user_response[:50]}...'")
 
-            return {
-                "user_responses": new_responses,
-            }
+    # Add response to the list
+    new_responses = user_responses + [user_response]
 
-    # Fallback if no HumanMessage found
-    print("collect_user_response: WARNING - no user response found in messages!")
-    return {}
+    return {
+        "user_responses": new_responses,
+        "messages": [HumanMessage(content=user_response)]
+    }
 
 
-async def validate_context_after_clarification(state: dict) -> dict:
+
+class TopicEvaluation(BaseModel):
+    is_sufficient: bool
+    finalized_topic: str
+
+
+async def validate_context_after_clarification(state: dict, config: RunnableConfig) -> dict:
     """
     Validate if we have enough context after collecting clarification responses.
-    Uses LLM to evaluate if the topic and clarifications provide sufficient information.
+    Uses LLM to evaluate if the topic and clarifications provide sufficient info.
     """
-    MAX_CLARIFICATION_ROUNDS = 5
-    
+    MAX_CLARIFICATION_ROUNDS = config.get("configurable", {}).get("max_clarification_rounds", 5)
+
     clarification_rounds = state.get("clarification_rounds", 0)
     topic = state.get("topic", "")
     clarification_questions = state.get("clarification_questions", [])
     user_responses = state.get("user_responses", [])
-    
-    # Safety check: if we've asked too many questions, proceed anyway
-    if clarification_rounds >= MAX_CLARIFICATION_ROUNDS:
-        return {
-            "is_finalized": True,
-            "clarification_rounds": clarification_rounds
-        }
-    
-    # Build full context
+
+    # Build full context string
     context = f"Research Topic: {topic}\n\n"
-    
+
     if clarification_questions:
         context += "Clarification Q&A:\n"
         for i, (q, r) in enumerate(zip(clarification_questions, user_responses)):
-            context += f"Q{i+1}: {q}\nA{i+1}: {r}\n\n"
-    
+            context += f"Q{i + 1}: {q}\nA{i + 1}: {r}\n\n"
+
+    structured_llm = llm.with_structured_output(TopicEvaluation)
+
     validation_prompt = f"""
-    You are evaluating whether there is enough information to conduct comprehensive research.
-    
-    {context}
-    
-    Determine if this information is sufficient to:
-    1. Determine the final topic
-    1. Generate meaningful subtopics
-    2. Conduct thorough research
-    3. Create a comprehensive report
-    
-    Consider:
-    - Is the topic specific enough?
-    - Are there clear research directions?
-    - Is the scope well-defined?
-    
-    Respond with ONLY "SUFFICIENT" or "INSUFFICIENT" followed by a brief reason.
-    """
-    
+You are evaluating whether there is enough information to conduct comprehensive research.
+
+{context}
+
+Your task:
+1. Decide whether the information is sufficient to finalize the topic and proceed with research.
+2. Provide your recommended finalized topic regardless of sufficiency.
+
+Definition of sufficiency:
+- Topic is specific and well-scoped.
+- Clear research directions exist.
+- Enough context is present to create subtopics, research steps, and a detailed report.
+
+IMPORTANT:
+Return ONLY the following fields in JSON form for structured parsing:
+- `is_sufficient`: true/false
+- `finalized_topic`: string
+"""
     messages = [
-        SystemMessage(content="You are a research coordinator evaluating if enough information has been gathered."),
+        SystemMessage(content="You are a research coordinator evaluating the completeness of context."),
         HumanMessage(content=validation_prompt)
     ]
-    
-    response = await llm.ainvoke(messages)
-    evaluation = response.content.strip() if hasattr(response, 'content') else str(response).strip()
 
-    # Check if context is sufficient (must start with SUFFICIENT, not INSUFFICIENT)
-    is_sufficient = evaluation.upper().startswith("SUFFICIENT")
+    response: TopicEvaluation = await structured_llm.ainvoke(messages)
+
+    is_sufficient = bool(response.is_sufficient)
+    finalized_topic = response.finalized_topic.strip()
+
     print(f"validate_context_after_clarification: is_sufficient={is_sufficient}, rounds={clarification_rounds}")
-    
-    return {
-        "is_finalized": is_sufficient
-    }
 
+    # If we hit the round limit, finalize no matter what
+    if clarification_rounds >= MAX_CLARIFICATION_ROUNDS:
+        return {
+            "is_finalized": True,
+            "topic": finalized_topic,
+            "clarification_rounds": clarification_rounds
+        }
 
-# ============================================================================
-# STATE TRANSFORMATION NODES
-# ============================================================================
+    # If sufficient, finalize
+    if is_sufficient:
+        return {
+            "is_finalized": True,
+            "topic": finalized_topic
+        }
 
-async def transform_to_subtopic_state(state: dict) -> dict:
-    """
-    Transformation node: Convert TopicInquiryState to SubtopicGenerationState structure.
-    This node adds the fields needed for subtopic generation.
-    """
-    # Extract TopicInquiryState fields
-    topic = state.get("topic", "")
-    messages = state.get("messages", [])
-    
-    # Add SubtopicGenerationState fields
-    return {
-        "subtopics": [],
-        "sub_researchers": []
-    }
+    # Otherwise request more clarification
+    return {"is_finalized": False}
 
-
-async def transform_to_report_state(state: dict) -> dict:
-    """
-    Transformation node: Convert SubtopicGenerationState to ReportWriterState structure.
-    This node adds the fields needed for report writing.
-    """
-    # Extract research data
-    sub_researchers = state.get("sub_researchers", [])
-    
-    # Build references from research results
-    references = []
-    for researcher in sub_researchers:
-        if isinstance(researcher, dict):
-            research_results = researcher.get("research_results", {})
-        else:
-            research_results = getattr(researcher, "research_results", {})
-        
-        for source in research_results.keys():
-            references.append(source)
-    
-    # Add ReportWriterState fields
-    return {
-        "report_history": [],
-        "current_report_id": 0,
-        "report_content": "",
-        "report_summary": "",
-        "report_conclusion": "",
-        "report_recommendations": [],
-        "report_references": references,
-        "report_citations": [],
-        "report_footnotes": [],
-        "report_endnotes": []
-    }
-
-
-async def transform_to_evaluator_state(state: dict) -> dict:
-    """
-    Transformation node: Convert ReportWriterState to ReportEvaluatorState structure.
-    This node adds the fields needed for report evaluation.
-    """
-    report_history = state.get("report_history", [])
-    current_report_id = state.get("current_report_id", 0)
-    
-    return {
-        "scores": {}
-    }
-
-
-# ============================================================================
-# WORKFLOW NODES
-# ============================================================================
 
 async def generate_subtopics(state: dict) -> dict:
     """Generate subtopics and create subresearchers using the subresearcher subgraph with multi-layer research"""
@@ -665,6 +606,73 @@ async def identify_report_gaps(state: dict) -> dict:
 
     return {
         "research_gaps": gaps_dicts
+    }
+
+
+# ============================================================================
+# STATE TRANSFORMATION NODES
+# ============================================================================
+
+async def transform_to_subtopic_state(state: dict) -> dict:
+    """
+    Transformation node: Convert TopicInquiryState to SubtopicGenerationState structure.
+    This node adds the fields needed for subtopic generation.
+    """
+    # Extract TopicInquiryState fields
+    topic = state.get("topic", "")
+    messages = state.get("messages", [])
+    
+    # Add SubtopicGenerationState fields
+    return {
+        "subtopics": [],
+        "sub_researchers": []
+    }
+
+
+async def transform_to_report_state(state: dict) -> dict:
+    """
+    Transformation node: Convert SubtopicGenerationState to ReportWriterState structure.
+    This node adds the fields needed for report writing.
+    """
+    # Extract research data
+    sub_researchers = state.get("sub_researchers", [])
+    
+    # Build references from research results
+    references = []
+    for researcher in sub_researchers:
+        if isinstance(researcher, dict):
+            research_results = researcher.get("research_results", {})
+        else:
+            research_results = getattr(researcher, "research_results", {})
+        
+        for source in research_results.keys():
+            references.append(source)
+    
+    # Add ReportWriterState fields
+    return {
+        "report_history": [],
+        "current_report_id": 0,
+        "report_content": "",
+        "report_summary": "",
+        "report_conclusion": "",
+        "report_recommendations": [],
+        "report_references": references,
+        "report_citations": [],
+        "report_footnotes": [],
+        "report_endnotes": []
+    }
+
+
+async def transform_to_evaluator_state(state: dict) -> dict:
+    """
+    Transformation node: Convert ReportWriterState to ReportEvaluatorState structure.
+    This node adds the fields needed for report evaluation.
+    """
+    report_history = state.get("report_history", [])
+    current_report_id = state.get("current_report_id", 0)
+    
+    return {
+        "scores": {}
     }
 
 
