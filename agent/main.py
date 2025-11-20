@@ -37,17 +37,17 @@ async def chat():
 
         # Determine input based on whether we're resuming or starting fresh
         if current_state.next:
-            # Resuming from interrupt - use Command(resume=user_input)
+            # Resuming from interrupt
             print("[Resuming from interrupt]")
             input_to_agent = Command(resume=user_input)
         elif first_run:
-            # First run - use initial state with user's topic
+            # First run -> use initial state with user's topic
             state["topic"] = user_input
             state["messages"] = [HumanMessage(content=user_input)]
             input_to_agent = state
             first_run = False
         else:
-            # New conversation turn
+            # New conversation
             input_to_agent = {
                 "topic": user_input,
                 "messages": [HumanMessage(content=user_input)]

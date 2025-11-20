@@ -5,6 +5,7 @@ from utils.model import llm
 from utils.subresearcher import subresearcher_graph
 from utils.verification import verify_research_cross_references
 from utils.version_control import save_report
+from utils.configuration import get_config_from_configurable
 import asyncio, json, re
 
 
@@ -13,13 +14,22 @@ import asyncio, json, re
 # NODES
 # ============================================================================
 
-def check_initial_context(state: dict) -> dict:
+def check_initial_context(state: dict, config: RunnableConfig) -> dict:
     """
     Check if initial topic has enough context to proceed.
     If sufficient, mark as finalized. If not, prepare for clarification loop.
     """
+    agent_config = get_config_from_configurable(config.get("configurable", {}))
+
     topic = state.get("topic", "")
-    print(f"check_initial_context: topic='{topic[:50]}...'")
+    print(f"check_initial_context: topic='{topic[:50]}...', max_clarification_rounds={agent_config.max_clarification_rounds}")
+
+    # If clarification is disabled (max_clarification_rounds = 0), skip validation and proceed
+    if agent_config.max_clarification_rounds == 0:
+        print("check_initial_context: clarification disabled, proceeding to research")
+        return {
+            "is_finalized": True
+        }
 
     if not topic or len(topic.strip()) == 0:
         print("check_initial_context: no topic found, returning is_finalized=False")
@@ -75,18 +85,18 @@ def generate_clarification_question(state: dict, config: RunnableConfig) -> dict
     Generate a clarification question based on current topic and previous responses.
     This node uses LLM to determine what information is still needed.
     """
-    MAX_CLARIFICATION_ROUNDS = config.get("configurable", {}).get("max_clarification_rounds", 5)
-    
+    agent_config = get_config_from_configurable(config.get("configurable", {}))
+
     clarification_rounds = state.get("clarification_rounds", 0)
     topic = state.get("topic", "")
     clarification_questions = state.get("clarification_questions", [])
     user_responses = state.get("user_responses", [])
-    
+
     print(f"generate_clarification_question: round={clarification_rounds}, topic='{topic[:50]}...'")
-    
+
     # If we've asked too many questions, skip this process
-    if clarification_rounds >= MAX_CLARIFICATION_ROUNDS:
-        print(f"generate_clarification_question: max rounds reached ({MAX_CLARIFICATION_ROUNDS}), finalizing")
+    if clarification_rounds >= agent_config.max_clarification_rounds:
+        print(f"generate_clarification_question: max rounds reached ({agent_config.max_clarification_rounds}), finalizing")
         return {
             "is_finalized": True,
             "clarification_rounds": clarification_rounds
@@ -172,7 +182,7 @@ async def validate_context_after_clarification(state: dict, config: RunnableConf
     Validate if we have enough context after collecting clarification responses.
     Uses LLM to evaluate if the topic and clarifications provide sufficient info.
     """
-    MAX_CLARIFICATION_ROUNDS = config.get("configurable", {}).get("max_clarification_rounds", 5)
+    agent_config = get_config_from_configurable(config.get("configurable", {}))
 
     clarification_rounds = state.get("clarification_rounds", 0)
     topic = state.get("topic", "")
@@ -226,7 +236,7 @@ Return ONLY the following fields in JSON form for structured parsing:
     print(f"validate_context_after_clarification: is_sufficient={is_sufficient}, rounds={clarification_rounds}")
 
     # If we hit the round limit, finalize no matter what
-    if clarification_rounds >= MAX_CLARIFICATION_ROUNDS:
+    if clarification_rounds >= agent_config.max_clarification_rounds:
         return {
             "is_finalized": True,
             "topic": finalized_topic,
@@ -243,8 +253,10 @@ Return ONLY the following fields in JSON form for structured parsing:
 
 
 
-async def generate_subtopics(state: dict) -> dict:
+async def generate_subtopics(state: dict, config: RunnableConfig) -> dict:
     """Generate subtopics and create subresearchers using the subresearcher subgraph with multi-layer research"""
+
+    agent_config = get_config_from_configurable(config.get("configurable", {}))
 
     topic = state.get("topic", "")
     print(f"generate_subtopics: starting for topic='{topic[:50]}...'")
@@ -259,13 +271,13 @@ async def generate_subtopics(state: dict) -> dict:
 
     prompt = f"""
     You are a helpful assistant that generates subtopics for a research report.
-    Come up with 3-5 subtopics for the given topic based on the topic's scope and complexity.
+    Come up with exactly {agent_config.num_subtopics} subtopics for the given topic.
 
     Topic: {topic}
     """
 
     llm_response = await structured_llm.ainvoke([
-        SystemMessage(content="You are a helpful assistant that generates subtopics for a research report. Come up with 3-5 subtopics for the given topic based on the topic's scope and complexity."),
+        SystemMessage(content=f"You are a helpful assistant that generates exactly {agent_config.num_subtopics} subtopics for a research report."),
         HumanMessage(content=prompt)
     ])
 
@@ -320,11 +332,22 @@ async def generate_subtopics(state: dict) -> dict:
 
 
 
-async def verify_cross_references(state: dict) -> dict:
+async def verify_cross_references(state: dict, config: RunnableConfig) -> dict:
     """
     Verify claims across multiple sources and identify conflicts.
     Uses verification.py functions to do the actual work.
     """
+
+    agent_config = get_config_from_configurable(config.get("configurable", {}))
+
+    # If cross-verification is disabled, skip this step
+    if not agent_config.enable_cross_verification:
+        print("verify_cross_references: cross-verification disabled, skipping")
+        return {
+            "verified_claims": [],
+            "conflicting_info": [],
+            "messages": [AIMessage(content="Cross-reference verification skipped (disabled in configuration).")]
+        }
 
     sub_researchers = state.get("sub_researchers", [])
     topic = state.get("topic", "")
@@ -438,16 +461,19 @@ async def generate_outline(state: dict) -> dict:
     }
 
 
-async def write_sections_with_citations(state: dict) -> dict:
+async def write_sections_with_citations(state: dict, config: RunnableConfig) -> dict:
     """
     Write each section of the report with proper inline citations
     Uses research results to build evidence-based sections
     """
+    agent_config = get_config_from_configurable(config.get("configurable", {}))
+
     topic = state.get("topic", "")
     outline = state.get("report_outline", {})
     sub_researchers = state.get("sub_researchers", [])
 
     print(f"write_sections_with_citations: writing sections for topic='{topic[:50]}...'")
+    print(f"write_sections_with_citations: using min_credibility_score={agent_config.min_credibility_score}")
 
     sections = outline.get("sections", [])
     written_sections = []
@@ -476,7 +502,11 @@ async def write_sections_with_citations(state: dict) -> dict:
                 results = research_by_subtopic[subtopic]["results"]
                 credibilities = research_by_subtopic[subtopic]["credibilities"]
 
-                for source, findings in list(results.items())[:3]:  # Top 3 sources per subtopic
+                # Filter sources by credibility and take top 3
+                credible_sources = [(source, findings) for source, findings in results.items()
+                                  if credibilities.get(source, 0.5) >= agent_config.min_credibility_score]
+
+                for source, findings in credible_sources[:3]:  # Top 3 credible sources per subtopic
                     credibility = credibilities.get(source, 0.5)
                     relevant_research += f"\nSource: {source} (credibility: {credibility:.2f})\n{findings}\n"
                     sources_list.append(source)
@@ -844,31 +874,33 @@ async def should_continue_to_report(state: dict) -> bool:
     return result
 
 
-def route_after_evaluation(state: dict) -> str:
+def route_after_evaluation(state: dict, config: RunnableConfig) -> str:
     """
     Conditional edge: Route after report evaluation
-    - If score >= 85: Report is good, finalize
-    - If score < 85 and revision_count < 2: Identify gaps and revise
-    - If revision_count >= 2: Accept report even if not perfect
+    - If score >= min_report_score: Report is good, finalize
+    - If score < min_report_score and revision_count < max_revision_rounds: Identify gaps and revise
+    - If revision_count >= max_revision_rounds: Accept report even if not perfect
     """
+    agent_config = get_config_from_configurable(config.get("configurable", {}))
+
     final_score = state.get("final_score", 0)
     revision_count = state.get("revision_count", 0)
-    MAX_REVISIONS = 2
 
     print(f"route_after_evaluation: score={final_score}, revisions={revision_count}")
+    print(f"route_after_evaluation: min_report_score={agent_config.min_report_score}, max_revision_rounds={agent_config.max_revision_rounds}")
 
     # If score is good enough, finalize
-    if final_score >= 85:
-        print(f"route_after_evaluation: score {final_score} >= 85, finalizing")
+    if final_score >= agent_config.min_report_score:
+        print(f"route_after_evaluation: score {final_score} >= {agent_config.min_report_score}, finalizing")
         return "finalize"
 
     # If we've hit max revisions, accept current version
-    if revision_count >= MAX_REVISIONS:
-        print(f"route_after_evaluation: max revisions ({MAX_REVISIONS}) reached, finalizing")
+    if revision_count >= agent_config.max_revision_rounds:
+        print(f"route_after_evaluation: max revisions ({agent_config.max_revision_rounds}) reached, finalizing")
         return "finalize"
 
     # Otherwise, identify gaps and revise
-    print(f"route_after_evaluation: score {final_score} < 85, identifying gaps for revision")
+    print(f"route_after_evaluation: score {final_score} < {agent_config.min_report_score}, identifying gaps for revision")
     return "revise"
 
 
