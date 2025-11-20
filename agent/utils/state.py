@@ -17,6 +17,7 @@ class UnifiedAgentState(TypedDict):
     """
     # TopicInquiryState fields (starting state)
     messages: Annotated[list[BaseMessage], add_messages]
+    report_id: str
     topic: str
     is_finalized: bool
     clarification_rounds: int
@@ -33,7 +34,7 @@ class UnifiedAgentState(TypedDict):
 
     # ReportWriterState fields (added by transformation node)
     report_history: list[int]
-    current_report_id: int
+    version_id: int
     report_content: str
     report_summary: str
     report_conclusion: str
@@ -50,3 +51,11 @@ class UnifiedAgentState(TypedDict):
     research_gaps: list[dict]  # Identified gaps in research/report
     revision_count: int  # Number of revision iterations
     final_score: int  # Final evaluation score
+
+    # User feedback loop fields
+    user_feedback: list[str]  # List of user's feedback on the report
+    feedback_incorporated: list[bool]  # List tracking if each feedback has been addressed
+
+    # Cross-reference verification fields
+    verified_claims: list[dict]  # Claims verified across multiple sources
+    conflicting_info: list[dict]  # Information that conflicts across sources

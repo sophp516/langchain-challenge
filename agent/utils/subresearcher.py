@@ -2,8 +2,8 @@ from typing import TypedDict
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
 from utils.model import llm
-from utils.tavily import tavily_client # Initialize tavily client separately for faster execution
-from utils.verification import filter_quality_sources, calculate_source_credibility
+from utils.configuration import tavily_client # Initialize tavily client separately for faster execution
+from utils.verification import filter_quality_sources
 import asyncio
 from functools import partial
 

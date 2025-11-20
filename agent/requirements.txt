@@ -5,3 +5,5 @@ pydantic
 tavily-python
 grandalf
 langgraph-cli[inmem]
+pymongo
+pymongo[srv]

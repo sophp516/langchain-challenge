@@ -37,7 +37,7 @@ LOW_QUALITY_INDICATORS = [
     'pinterest', 'tumblr', 'medium.com'
 ]
 
-
+# TODO: Review verification.py functions and delete unused ones
 def calculate_source_credibility(url: str, title: str, content: str) -> float:
     """
     Calculate credibility score for a source (0.0 to 1.0)
@@ -326,3 +326,81 @@ async def calculate_research_confidence(
     confidence = avg_credibility * count_factor
 
     return min(1.0, max(0.0, confidence))
+
+
+async def verify_research_cross_references(
+    topic: str,
+    sub_researchers: List[Dict]
+) -> Dict:
+    """
+    Main function to verify claims across multiple sources and identify conflicts.
+    Combines extract_claims, cross_validate_claim, and detect_contradictions.
+
+    Returns dict with:
+    - verified_claims: List of claims verified across sources with confidence
+    - conflicting_info: List of conflicts found between sources
+    """
+    print(f"verify_research_cross_references: analyzing sources for topic='{topic[:50]}...'")
+
+    # Collect all research results from sub_researchers
+    all_research_results = {}
+    for researcher in sub_researchers:
+        results = researcher.get("research_results", {})
+        all_research_results.update(results)
+
+    if len(all_research_results) < 2:
+        print("verify_research_cross_references: not enough sources to cross-reference")
+        return {
+            "verified_claims": [],
+            "conflicting_info": []
+        }
+
+    # Step 1: Extract claims from each source
+    all_claims = []
+    for source, content in list(all_research_results.items())[:5]:  # Limit for performance
+        claims = await extract_claims(content)
+        for claim in claims[:3]:  # Top 3 claims per source
+            all_claims.append(claim)
+
+    # Deduplicate similar claims (simple approach)
+    unique_claims = list(set(all_claims))[:10]  # Max 10 claims to validate
+
+    # Step 2: Cross-validate each claim
+    verified_claims = []
+    for claim in unique_claims:
+        validation_result = await cross_validate_claim(claim, all_research_results)
+
+        # Only include claims with some support
+        if validation_result['support_level'] in ['supported', 'unverified'] and validation_result['confidence'] > 0.3:
+            verified_claims.append({
+                "claim": validation_result['claim'],
+                "sources": validation_result['supporting_sources'],
+                "confidence": "high" if validation_result['confidence'] > 0.7 else "medium" if validation_result['confidence'] > 0.4 else "low"
+            })
+
+    # Step 3: Detect contradictions between sources
+    contradictions = await detect_contradictions(all_research_results)
+
+    # Format contradictions for state
+    conflicting_info = []
+    sources_list = list(all_research_results.keys())
+    for contradiction in contradictions:
+        try:
+            source_a_idx = int(contradiction.get('source_a', '1')) - 1
+            source_b_idx = int(contradiction.get('source_b', '2')) - 1
+            conflicting_info.append({
+                "topic": contradiction.get('description', 'Unknown conflict'),
+                "source1": sources_list[source_a_idx] if source_a_idx < len(sources_list) else "Unknown",
+                "position1": "See source for details",
+                "source2": sources_list[source_b_idx] if source_b_idx < len(sources_list) else "Unknown",
+                "position2": "See source for details"
+            })
+        except:
+            pass
+
+    print(f"verify_research_cross_references: found {len(verified_claims)} verified claims, {len(conflicting_info)} conflicts")
+
+    return {
+        "verified_claims": verified_claims,
+        "conflicting_info": conflicting_info
+    }

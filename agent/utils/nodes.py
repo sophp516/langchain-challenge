@@ -1,10 +1,11 @@
-from typing import TypedDict
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.types import RunnableConfig, interrupt
-from pydantic import BaseModel, create_model
+from pydantic import create_model
 from utils.model import llm
 from utils.subresearcher import subresearcher_graph
-import asyncio
+from utils.verification import verify_research_cross_references
+from utils.version_control import save_report
+import asyncio, json, re
 
 
 
@@ -20,14 +21,13 @@ def check_initial_context(state: dict) -> dict:
     topic = state.get("topic", "")
     print(f"check_initial_context: topic='{topic[:50]}...'")
 
-    # Basic validation checks
     if not topic or len(topic.strip()) == 0:
         print("check_initial_context: no topic found, returning is_finalized=False")
         return {
             "is_finalized": False
         }
 
-    # Use LLM to evaluate if initial topic has enough context
+
     evaluation_prompt = f"""
     You are a strict research coordinator. Evaluate if the following is a valid and detailed research topic.
 
@@ -84,22 +84,21 @@ def generate_clarification_question(state: dict, config: RunnableConfig) -> dict
     
     print(f"generate_clarification_question: round={clarification_rounds}, topic='{topic[:50]}...'")
     
-    # Safety check: if we've asked too many questions, proceed anyway
+    # If we've asked too many questions, skip this process
     if clarification_rounds >= MAX_CLARIFICATION_ROUNDS:
         print(f"generate_clarification_question: max rounds reached ({MAX_CLARIFICATION_ROUNDS}), finalizing")
         return {
             "is_finalized": True,
             "clarification_rounds": clarification_rounds
         }
-    
-    # Build context from previous interactions
+
     context = f"Topic: {topic}\n"
     if clarification_questions:
         context += "\nPrevious questions asked:\n"
         for i, (q, r) in enumerate(zip(clarification_questions, user_responses)):
             context += f"Q{i+1}: {q}\nA{i+1}: {r}\n"
     
-    # Use LLM to generate a clarification question
+    # Generate a clarification question
     clarification_prompt = f"""
     You are a research assistant helping to clarify a research topic.
     
@@ -123,15 +122,13 @@ def generate_clarification_question(state: dict, config: RunnableConfig) -> dict
     response = llm.invoke(messages)
     question = response.content.strip() if hasattr(response, 'content') else str(response).strip()
 
-    # Check if LLM says we have enough context
     if question.upper() == "ENOUGH_CONTEXT" or "enough context" in question.lower():
         print("generate_clarification_question: LLM indicated enough context")
         return {
             "is_finalized": True,
             "clarification_rounds": clarification_rounds
         }
-    
-    # Add the question to the list
+
     new_questions = clarification_questions + [question]
     print(f"generate_clarification_question: generated question='{question[:100]}...'")
     clarification_question = AIMessage(content=question)
@@ -158,24 +155,16 @@ def collect_user_response(state: dict) -> dict:
     last_message = messages[-1] if messages else None
     question = last_message.content if last_message else "Please provide your response"
 
-    # Call interrupt() - this pauses execution and waits for Command(resume=user_input)
-    user_response = interrupt(question)
+    user_response = interrupt(question) # Need resume on chat function
 
     print(f"collect_user_response: received user response '{user_response[:50]}...'")
 
-    # Add response to the list
     new_responses = user_responses + [user_response]
 
     return {
         "user_responses": new_responses,
         "messages": [HumanMessage(content=user_response)]
     }
-
-
-
-class TopicEvaluation(BaseModel):
-    is_sufficient: bool
-    finalized_topic: str
 
 
 async def validate_context_after_clarification(state: dict, config: RunnableConfig) -> dict:
@@ -190,7 +179,6 @@ async def validate_context_after_clarification(state: dict, config: RunnableConf
     clarification_questions = state.get("clarification_questions", [])
     user_responses = state.get("user_responses", [])
 
-    # Build full context string
     context = f"Research Topic: {topic}\n\n"
 
     if clarification_questions:
@@ -198,7 +186,13 @@ async def validate_context_after_clarification(state: dict, config: RunnableConf
         for i, (q, r) in enumerate(zip(clarification_questions, user_responses)):
             context += f"Q{i + 1}: {q}\nA{i + 1}: {r}\n\n"
 
-    structured_llm = llm.with_structured_output(TopicEvaluation)
+    TopicEvaluationOutput = create_model(
+        'TopicEvaluationOutput',
+        is_sufficient=(bool, ...),
+        finalized_topic=(str, ...)
+    )
+
+    structured_llm = llm.with_structured_output(TopicEvaluationOutput)
 
     validation_prompt = f"""
 You are evaluating whether there is enough information to conduct comprehensive research.
@@ -224,7 +218,7 @@ Return ONLY the following fields in JSON form for structured parsing:
         HumanMessage(content=validation_prompt)
     ]
 
-    response: TopicEvaluation = await structured_llm.ainvoke(messages)
+    response = await structured_llm.ainvoke(messages)
 
     is_sufficient = bool(response.is_sufficient)
     finalized_topic = response.finalized_topic.strip()
@@ -239,20 +233,19 @@ Return ONLY the following fields in JSON form for structured parsing:
             "clarification_rounds": clarification_rounds
         }
 
-    # If sufficient, finalize
-    if is_sufficient:
+    if is_sufficient: # Start generating subtopics
         return {
             "is_finalized": True,
             "topic": finalized_topic
         }
 
-    # Otherwise request more clarification
     return {"is_finalized": False}
+
 
 
 async def generate_subtopics(state: dict) -> dict:
     """Generate subtopics and create subresearchers using the subresearcher subgraph with multi-layer research"""
-    # Read topic from state (works with unified state)
+
     topic = state.get("topic", "")
     print(f"generate_subtopics: starting for topic='{topic[:50]}...'")
 
@@ -279,7 +272,7 @@ async def generate_subtopics(state: dict) -> dict:
     subtopics = llm_response.subtopics
     print(f"generate_subtopics: generated {len(subtopics)} subtopics")
 
-    # Generate subresearchers for each subtopic using the enhanced subgraph in parallel
+    # Generate subresearchers for each subtopic in parallel
     async def process_subtopic(idx: int, subtopic: str):
         """Process a single subtopic through the multi-layer subresearcher subgraph"""
         subgraph_state = {
@@ -291,10 +284,8 @@ async def generate_subtopics(state: dict) -> dict:
             "follow_up_queries": []
         }
 
-        # Invoke the enhanced subresearcher subgraph (now with multi-layer research)
         result = await subresearcher_graph.ainvoke(subgraph_state)
 
-        # Return comprehensive research results with credibility info
         return {
             "subtopic_id": idx,
             "subtopic": subtopic,
@@ -303,21 +294,58 @@ async def generate_subtopics(state: dict) -> dict:
             "research_depth": result.get("research_depth", 1)
         }
 
-    # Process all subtopics in parallel
     tasks = [process_subtopic(idx, subtopic) for idx, subtopic in enumerate(subtopics)]
     print(f"generate_subtopics: processing {len(tasks)} subtopics in parallel with multi-layer research")
     sub_researchers = await asyncio.gather(*tasks)
     print(f"generate_subtopics: completed processing {len(sub_researchers)} sub_researchers")
 
-    # Log research depth achieved
     for researcher in sub_researchers:
         depth = researcher.get("research_depth", 1)
         sources = len(researcher.get("research_results", {}))
         print(f"  - {researcher.get('subtopic', 'Unknown')}: {sources} sources, depth {depth}")
 
+    subtopic_list = "\n".join(f"{i + 1}. {st}" for i, st in enumerate(subtopics))
+
+    subtopic_alert_message = f"""
+    I've come up with {len(subtopics)} research areas on this topic:
+
+    {subtopic_list}
+    """
+
     return {
+        "messages": [AIMessage(content=subtopic_alert_message)],
         "sub_researchers": [r for r in sub_researchers],
         "subtopics": subtopics,
+    }
+
+
+
+async def verify_cross_references(state: dict) -> dict:
+    """
+    Verify claims across multiple sources and identify conflicts.
+    Uses verification.py functions to do the actual work.
+    """
+
+    sub_researchers = state.get("sub_researchers", [])
+    topic = state.get("topic", "")
+
+    # Use the main verification function from verification.py
+    result = await verify_research_cross_references(topic, sub_researchers)
+
+    verified_claims = result.get("verified_claims", [])
+    conflicts = result.get("conflicting_info", [])
+
+    # Create message about verification results
+    verification_summary = f"Cross-reference verification complete:\n"
+    verification_summary += f"- {len(verified_claims)} claims verified across multiple sources\n"
+    if conflicts:
+        verification_summary += f"- {len(conflicts)} conflicting pieces of information found\n"
+        verification_summary += "\nConflicts will be noted in the report for transparency."
+
+    return {
+        "verified_claims": verified_claims,
+        "conflicting_info": conflicts,
+        "messages": [AIMessage(content=verification_summary)]
     }
 
 
@@ -326,6 +354,7 @@ async def generate_outline(state: dict) -> dict:
     Generate a structured outline for the report based on research
     Maps subtopics to sections with specific focus areas
     """
+
     topic = state.get("topic", "")
     sub_researchers = state.get("sub_researchers", [])
 
@@ -376,8 +405,6 @@ async def generate_outline(state: dict) -> dict:
     response_text = response.content if hasattr(response, 'content') else str(response)
 
     # Parse JSON outline (simplified)
-    import json
-    import re
     try:
         json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
         if json_match:
@@ -508,13 +535,24 @@ async def write_sections_with_citations(state: dict) -> dict:
         contentType="text/markdown"
     )
 
+    # Save report to MongoDB
+    report_id = state.get("report_id", "")
+    new_version_id = state.get("version_id", 0) + 1
+
+    if report_id:
+        try:
+            await save_report(report_id, new_version_id, full_report)
+            print(f"write_sections_with_citations: saved report {report_id} version {new_version_id} to MongoDB")
+        except Exception as e:
+            print(f"write_sections_with_citations: failed to save report to MongoDB: {e}")
+
     return {
         "report_sections": written_sections,
         "report_content": full_report,
         "report_references": unique_sources,
         "messages": [final_report_message],
-        "current_report_id": state.get("current_report_id", 0) + 1,
-        "report_history": state.get("report_history", []) + [state.get("current_report_id", 0) + 1]
+        "version_id": new_version_id,
+        "report_history": state.get("report_history", []) + [new_version_id]
     }
 
 
@@ -609,71 +647,165 @@ async def identify_report_gaps(state: dict) -> dict:
     }
 
 
-# ============================================================================
-# STATE TRANSFORMATION NODES
-# ============================================================================
+def collect_user_feedback(state: dict) -> dict:
+    """
+    Collect user feedback on the report after initial generation.
+    Uses interrupt to pause and wait for user input.
+    Appends feedback to list for tracking multiple rounds of feedback.
+    """
+    report_sections = state.get("report_sections", [])
+    user_feedback_list = state.get("user_feedback", [])
+    feedback_incorporated_list = state.get("feedback_incorporated", [])
 
-async def transform_to_subtopic_state(state: dict) -> dict:
+    print(f"collect_user_feedback: waiting for user feedback (round {len(user_feedback_list) + 1})")
+
+    # Build section list for user reference
+    section_titles = [s.get("title", "Untitled") for s in report_sections]
+    section_list = "\n".join(f"  {i+1}. {title}" for i, title in enumerate(section_titles))
+
+    feedback_prompt = f"""
+I've completed the report. Here are the sections:
+
+{section_list}
+
+Would you like me to:
+- Expand on any specific areas?
+- Add more detail to certain topics?
+- Clarify any points?
+- Make any other improvements?
+
+Please provide your feedback, or type 'done' if the report is satisfactory.
+"""
+
+    # Interrupt and wait for user feedback
+    user_input = interrupt(feedback_prompt)
+
+    print(f"collect_user_feedback: received feedback '{user_input[:50]}...'")
+
+    # Check if user is satisfied
+    is_done = user_input.lower().strip() in ['done', 'no', 'none', 'looks good', 'satisfied', 'good']
+
+    # Append feedback to list
+    new_feedback_list = user_feedback_list + [user_input]
+    new_incorporated_list = feedback_incorporated_list + [is_done]
+
+    return {
+        "user_feedback": new_feedback_list,
+        "feedback_incorporated": new_incorporated_list,
+        "messages": [HumanMessage(content=user_input)]
+    }
+
+
+async def incorporate_feedback(state: dict) -> dict:
     """
-    Transformation node: Convert TopicInquiryState to SubtopicGenerationState structure.
-    This node adds the fields needed for subtopic generation.
+    Incorporate user feedback holistically across the entire report.
+    Processes all unincorporated feedback from the feedback list.
     """
-    # Extract TopicInquiryState fields
+    user_feedback_list = state.get("user_feedback", [])
+    feedback_incorporated_list = state.get("feedback_incorporated", [])
+    report_content = state.get("report_content", "")
     topic = state.get("topic", "")
-    messages = state.get("messages", [])
-    
-    # Add SubtopicGenerationState fields
-    return {
-        "subtopics": [],
-        "sub_researchers": []
-    }
-
-
-async def transform_to_report_state(state: dict) -> dict:
-    """
-    Transformation node: Convert SubtopicGenerationState to ReportWriterState structure.
-    This node adds the fields needed for report writing.
-    """
-    # Extract research data
     sub_researchers = state.get("sub_researchers", [])
-    
-    # Build references from research results
-    references = []
+
+    # Find unincorporated feedback
+    unincorporated_feedback = []
+    for i, (feedback, is_incorporated) in enumerate(zip(user_feedback_list, feedback_incorporated_list)):
+        if not is_incorporated:
+            unincorporated_feedback.append(feedback)
+
+    print(f"incorporate_feedback: processing {len(unincorporated_feedback)} unincorporated feedback items")
+
+    if len(unincorporated_feedback) == 0:
+        return {
+            "feedback_incorporated": feedback_incorporated_list,
+            "messages": [AIMessage(content="All feedback has been incorporated.")]
+        }
+
+    # Gather all available research
+    all_research = ""
     for researcher in sub_researchers:
-        if isinstance(researcher, dict):
-            research_results = researcher.get("research_results", {})
-        else:
-            research_results = getattr(researcher, "research_results", {})
-        
-        for source in research_results.keys():
-            references.append(source)
-    
-    # Add ReportWriterState fields
+        subtopic = researcher.get("subtopic", "")
+        results = researcher.get("research_results", {})
+        all_research += f"\n=== Research on: {subtopic} ===\n"
+        for source, content in list(results.items())[:2]:  # Top 2 sources per subtopic
+            all_research += f"Source: {source}\n{content[:500]}...\n\n"
+
+    # Combine all unincorporated feedback
+    combined_feedback = "\n".join(f"{i+1}. {fb}" for i, fb in enumerate(unincorporated_feedback))
+
+    revision_prompt = f"""
+    Revise and improve the following research report based on user feedback.
+
+    Current Report:
+    {report_content[:8000]}
+
+    User Feedback to Address:
+    {combined_feedback}
+
+    Additional Research Available:
+    {all_research[:3000]}
+
+    Instructions:
+    - Address ALL the feedback points provided
+    - Maintain the existing structure and sections
+    - Expand, clarify, or add detail where requested
+    - Keep all citations intact and add new ones where appropriate
+    - Ensure the report remains coherent and well-organized
+
+    Provide the COMPLETE revised report with all sections and references.
+    """
+
+    messages = [
+        SystemMessage(content="You are a research report writer who revises reports based on user feedback while maintaining quality and coherence."),
+        HumanMessage(content=revision_prompt)
+    ]
+
+    response = await llm.ainvoke(messages)
+    revised_report = response.content if hasattr(response, 'content') else str(response)
+
+    # Mark all current feedback as incorporated
+    new_incorporated_list = [True] * len(user_feedback_list)
+
+    print(f"incorporate_feedback: completed revision with {len(unincorporated_feedback)} feedback items addressed")
+
+    # Save revised report to MongoDB
+    report_id = state.get("report_id", "")
+    new_version_id = state.get("version_id", 0) + 1
+
+    if report_id:
+        try:
+            await save_report(report_id, new_version_id, revised_report)
+            print(f"incorporate_feedback: saved report {report_id} version {new_version_id} to MongoDB")
+        except Exception as e:
+            print(f"incorporate_feedback: failed to save report to MongoDB: {e}")
+
     return {
-        "report_history": [],
-        "current_report_id": 0,
-        "report_content": "",
-        "report_summary": "",
-        "report_conclusion": "",
-        "report_recommendations": [],
-        "report_references": references,
-        "report_citations": [],
-        "report_footnotes": [],
-        "report_endnotes": []
+        "report_content": revised_report,
+        "feedback_incorporated": new_incorporated_list,
+        "version_id": new_version_id,
+        "report_history": state.get("report_history", []) + [new_version_id],
+        "messages": [AIMessage(content=f"I've revised the report based on your feedback. {len(unincorporated_feedback)} improvement(s) have been addressed.")]
     }
 
 
-async def transform_to_evaluator_state(state: dict) -> dict:
+def route_after_feedback(state: dict) -> str:
     """
-    Transformation node: Convert ReportWriterState to ReportEvaluatorState structure.
-    This node adds the fields needed for report evaluation.
+    Route after collecting user feedback.
+    - If all feedback is incorporated: continue to end
+    - If any feedback needs incorporation: incorporate feedback
     """
-    report_history = state.get("report_history", [])
-    current_report_id = state.get("current_report_id", 0)
-    
-    return {
-        "scores": {}
-    }
+    feedback_incorporated_list = state.get("feedback_incorporated", [])
+
+    # Check if all feedbacks are incorporated
+    all_incorporated = all(feedback_incorporated_list) if feedback_incorporated_list else False
+
+    if all_incorporated:
+        print("route_after_feedback: all feedback incorporated, routing to 'finalize'")
+        return "finalize"
+    else:
+        unincorporated_count = sum(1 for x in feedback_incorporated_list if not x)
+        print(f"route_after_feedback: {unincorporated_count} feedback items need incorporation, routing to 'incorporate'")
+        return "incorporate"
 
 
 # ============================================================================

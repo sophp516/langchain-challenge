@@ -1,20 +1,22 @@
 from utils.nodes import *
 from utils.state import UnifiedAgentState
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
 
 
 def create_agent(use_checkpointer=False):
     """
-    Create and compile the enhanced agent graph with feedback loop.
+    Create and compile the enhanced agent graph with cross-reference verification and user feedback.
 
     Flow:
     1. Topic inquiry + clarification
     2. Multi-layer research on subtopics
-    3. Outline generation
-    4. Section-by-section writing
-    5. Evaluation
-    6. [If score < 85] Gap identification → Regenerate outline → Rewrite
-    7. Finalize
+    3. Cross-reference verification
+    4. Outline generation
+    5. Section-by-section writing (full report generated)
+    6. User feedback loop (with interrupt)
+    7. Incorporate feedback (if requested)
+    8. Finalize
     """
     workflow = StateGraph(UnifiedAgentState)
 
@@ -24,19 +26,19 @@ def create_agent(use_checkpointer=False):
     workflow.add_node("collect_response", collect_user_response)
     workflow.add_node("validate_context", validate_context_after_clarification)
 
-    # State Transformation Nodes
-    workflow.add_node("transform_to_subtopic", transform_to_subtopic_state)
-    workflow.add_node("transform_to_report", transform_to_report_state)
-    workflow.add_node("transform_to_evaluator", transform_to_evaluator_state)
-
     # Research Workflow Nodes
-    workflow.add_node("generate_subtopics", generate_subtopics)  # Now with multi-layer research
+    workflow.add_node("generate_subtopics", generate_subtopics)
+    workflow.add_node("verify_cross_references", verify_cross_references)
 
-    #  Report Writing Nodes (Enhanced)
+    # Report Writing Nodes
     workflow.add_node("generate_outline", generate_outline)
     workflow.add_node("write_sections", write_sections_with_citations)
 
-    # Evaluation & Improvement Nodes
+    # User Feedback Nodes (after full report is generated)
+    workflow.add_node("collect_feedback", collect_user_feedback)
+    workflow.add_node("incorporate_feedback", incorporate_feedback)
+
+    # Evaluation Nodes (after user is satisfied)
     workflow.add_node("evaluate_report", evaluate_report)
     workflow.add_node("identify_gaps", identify_report_gaps)
 
@@ -48,7 +50,7 @@ def create_agent(use_checkpointer=False):
         "check_initial_context",
         route_after_initial_check,
         {
-            "continue": "transform_to_subtopic",
+            "continue": "generate_subtopics",
             "ask_clarification": "generate_clarification"
         }
     )
@@ -60,48 +62,53 @@ def create_agent(use_checkpointer=False):
         "validate_context",
         route_after_clarification,
         {
-            "continue": "transform_to_subtopic",
+            "continue": "generate_subtopics",
             "ask_clarification": "generate_clarification"
         }
     )
 
-    # Research Flow
-    workflow.add_edge("transform_to_subtopic", "generate_subtopics")
+    # Research Flow with Cross-Reference Verification
+    workflow.add_edge("generate_subtopics", "verify_cross_references")
 
     # Report Writing Flow
-    workflow.add_edge("generate_subtopics", "transform_to_report")
-    workflow.add_edge("transform_to_report", "generate_outline")
+    workflow.add_edge("verify_cross_references", "generate_outline")
     workflow.add_edge("generate_outline", "write_sections")
 
-    # Evaluation & Feedback Loop
-    workflow.add_edge("write_sections", "transform_to_evaluator")
-    workflow.add_edge("transform_to_evaluator", "evaluate_report")
-
-    # Finalize or Revise
+    # LLM Evaluation Flow (after writing sections)
+    workflow.add_edge("write_sections", "evaluate_report")
     workflow.add_conditional_edges(
         "evaluate_report",
         route_after_evaluation,
         {
-            "finalize": END,
+            "finalize": "collect_feedback",
             "revise": "identify_gaps"
         }
     )
 
-    # After identifying gaps, decide whether to regenerate or finalize
+    # Gap identification can lead to regenerating outline or proceeding to user feedback
     workflow.add_conditional_edges(
         "identify_gaps",
         route_after_gap_identification,
         {
-            "regenerate": "generate_outline",  # Loop back to regenerate outline
+            "regenerate": "generate_outline",
+            "finalize": "collect_feedback"
+        }
+    )
+
+    # User Feedback Loop (after LLM evaluation passes)
+    workflow.add_conditional_edges(
+        "collect_feedback",
+        route_after_feedback,
+        {
+            "incorporate": "incorporate_feedback",
             "finalize": END
         }
     )
 
-    # Compile the graph
-    # The collect_response node calls interrupt() internally to pause and wait for user input
-    # Resume happens via Command(resume=user_input) in main.py
+    # After incorporating feedback, collect more feedback or end
+    workflow.add_edge("incorporate_feedback", "collect_feedback")
+
     if use_checkpointer:
-        from langgraph.checkpoint.memory import MemorySaver
         memory = MemorySaver()
         return workflow.compile(checkpointer=memory)
     else:
