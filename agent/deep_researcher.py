@@ -35,6 +35,7 @@ def create_agent(use_checkpointer=False):
     workflow.add_node("write_sections", write_sections_with_citations)
 
     # User Feedback Nodes (after full report is generated)
+    workflow.add_node("prompt_for_feedback", prompt_for_feedback)
     workflow.add_node("collect_feedback", collect_user_feedback)
     workflow.add_node("incorporate_feedback", incorporate_feedback)
 
@@ -80,7 +81,7 @@ def create_agent(use_checkpointer=False):
         "evaluate_report",
         route_after_evaluation,
         {
-            "finalize": "collect_feedback",
+            "finalize": "prompt_for_feedback",
             "revise": "identify_gaps"
         }
     )
@@ -91,9 +92,12 @@ def create_agent(use_checkpointer=False):
         route_after_gap_identification,
         {
             "regenerate": "generate_outline",
-            "finalize": "collect_feedback"
+            "finalize": "prompt_for_feedback"
         }
     )
+
+    # Show feedback prompt, then collect feedback
+    workflow.add_edge("prompt_for_feedback", "collect_feedback")
 
     # User Feedback Loop (after LLM evaluation passes)
     workflow.add_conditional_edges(
@@ -106,7 +110,7 @@ def create_agent(use_checkpointer=False):
     )
 
     # After incorporating feedback, collect more feedback or end
-    workflow.add_edge("incorporate_feedback", "collect_feedback")
+    workflow.add_edge("incorporate_feedback", "prompt_for_feedback")
 
     if use_checkpointer:
         memory = MemorySaver()

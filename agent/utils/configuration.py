@@ -74,7 +74,7 @@ class AgentConfig(BaseModel):
 
     # Cross-reference verification
     enable_cross_verification: bool = Field(
-        default=True,
+        default=False,
         description="Whether to verify cross-references between sources"
     )
 

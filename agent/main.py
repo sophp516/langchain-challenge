@@ -11,9 +11,15 @@ async def chat():
 
     agent.get_graph().print_ascii()
     thread_id = f"local_{uuid.uuid4().hex[:8]}"
-    config = {"configurable": {"thread_id": thread_id, "max_clarification_rounds": 3}}
 
-    # Initialize state with user's topic
+    # change to override agentConfig
+    config = {
+        "configurable": {
+            "thread_id": thread_id
+        }
+    }
+
+    # initialize state with user's topic
     state = {
         "topic": "",
         "messages": [],
@@ -25,38 +31,35 @@ async def chat():
 
     first_run = True
     chatting = True
-    seen_message_ids = set()  # Track messages we've already displayed
+    seen_message_ids = set()  # track messages we've already displayed
 
     while chatting:
         user_input = input("User: ")
         if user_input.lower() in ["exit", "quit", "bye"]:
             break
 
-        # Get current state to check if we're resuming from an interrupt
         current_state = agent.get_state(config)
 
-        # Determine input based on whether we're resuming or starting fresh
         if current_state.next:
-            # Resuming from interrupt
+            # resuming from interrupt
             print("[Resuming from interrupt]")
             input_to_agent = Command(resume=user_input)
         elif first_run:
-            # First run -> use initial state with user's topic
+            # first run -> use initial state with user's topic
             state["topic"] = user_input
             state["messages"] = [HumanMessage(content=user_input)]
             input_to_agent = state
             first_run = False
         else:
-            # New conversation
+            # new conversation
             input_to_agent = {
                 "topic": user_input,
                 "messages": [HumanMessage(content=user_input)]
             }
 
-        # Execute the graph and get result
         result = await agent.ainvoke(input_to_agent, config)
 
-        # Get all messages from the result and display only new AI messages
+        # get all messages from the result and display only new AI messages
         if "messages" in result and result["messages"]:
             for message in result["messages"]:
                 msg_id = message.id

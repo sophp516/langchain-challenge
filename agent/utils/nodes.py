@@ -6,7 +6,7 @@ from utils.subresearcher import subresearcher_graph
 from utils.verification import verify_research_cross_references
 from utils.version_control import save_report
 from utils.configuration import get_config_from_configurable
-import asyncio, json, re
+import asyncio, json, re, uuid
 
 
 
@@ -461,10 +461,76 @@ async def generate_outline(state: dict) -> dict:
     }
 
 
+async def write_single_section(
+    section: dict,
+    topic: str,
+    research_by_subtopic: dict,
+    min_credibility_score: float
+) -> dict:
+    """
+    Write a single section of the report with citations.
+    This function is called in parallel for each section.
+    """
+    section_title = section.get("title", "")
+    section_subtopics = section.get("subtopics", [])
+
+    print(f"  Writing section: {section_title}")
+
+    # Gather relevant research for this section
+    relevant_research = ""
+    sources_list = []
+    for subtopic in section_subtopics:
+        if subtopic in research_by_subtopic:
+            results = research_by_subtopic[subtopic]["results"]
+            credibilities = research_by_subtopic[subtopic]["credibilities"]
+
+            # Filter sources by credibility and take top 3
+            credible_sources = [(source, findings) for source, findings in results.items()
+                              if credibilities.get(source, 0.5) >= min_credibility_score]
+
+            for source, findings in credible_sources[:3]:  # Top 3 credible sources per subtopic
+                credibility = credibilities.get(source, 0.5)
+                relevant_research += f"\nSource: {source} (credibility: {credibility:.2f})\n{findings}\n"
+                sources_list.append(source)
+
+    # If no specific research, use general overview
+    if not relevant_research:
+        relevant_research = "General context based on overall research findings."
+
+    section_prompt = f"""
+    Write the "{section_title}" section of a research report on: {topic}
+
+    Research findings:
+    {relevant_research[:3000]}  # Limit to avoid token issues
+
+    Write a well-structured section with:
+    - Clear topic sentences
+    - Evidence from sources with inline citations like [1], [2], etc.
+    - Logical flow and transitions
+    - 2-4 paragraphs depending on content
+
+    Include inline citations referencing the sources by number.
+    """
+
+    messages = [
+        SystemMessage(content="You are a research report writer that creates well-structured, evidence-based sections with proper citations."),
+        HumanMessage(content=section_prompt)
+    ]
+
+    response = await llm.ainvoke(messages)
+    section_content = response.content if hasattr(response, 'content') else str(response)
+
+    return {
+        "title": section_title,
+        "content": section_content,
+        "sources": sources_list
+    }
+
+
 async def write_sections_with_citations(state: dict, config: RunnableConfig) -> dict:
     """
-    Write each section of the report with proper inline citations
-    Uses research results to build evidence-based sections
+    Write each section of the report with proper inline citations in parallel.
+    Uses research results to build evidence-based sections.
     """
     agent_config = get_config_from_configurable(config.get("configurable", {}))
 
@@ -476,7 +542,6 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
     print(f"write_sections_with_citations: using min_credibility_score={agent_config.min_credibility_score}")
 
     sections = outline.get("sections", [])
-    written_sections = []
 
     # Build research lookup by subtopic
     research_by_subtopic = {}
@@ -487,62 +552,13 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
             "credibilities": researcher.get("source_credibilities", {})
         }
 
-    # Write each section
-    for section in sections:
-        section_title = section.get("title", "")
-        section_subtopics = section.get("subtopics", [])
-
-        print(f"  Writing section: {section_title}")
-
-        # Gather relevant research for this section
-        relevant_research = ""
-        sources_list = []
-        for subtopic in section_subtopics:
-            if subtopic in research_by_subtopic:
-                results = research_by_subtopic[subtopic]["results"]
-                credibilities = research_by_subtopic[subtopic]["credibilities"]
-
-                # Filter sources by credibility and take top 3
-                credible_sources = [(source, findings) for source, findings in results.items()
-                                  if credibilities.get(source, 0.5) >= agent_config.min_credibility_score]
-
-                for source, findings in credible_sources[:3]:  # Top 3 credible sources per subtopic
-                    credibility = credibilities.get(source, 0.5)
-                    relevant_research += f"\nSource: {source} (credibility: {credibility:.2f})\n{findings}\n"
-                    sources_list.append(source)
-
-        # If no specific research, use general overview
-        if not relevant_research:
-            relevant_research = "General context based on overall research findings."
-
-        section_prompt = f"""
-        Write the "{section_title}" section of a research report on: {topic}
-
-        Research findings:
-        {relevant_research[:3000]}  # Limit to avoid token issues
-
-        Write a well-structured section with:
-        - Clear topic sentences
-        - Evidence from sources with inline citations like [1], [2], etc.
-        - Logical flow and transitions
-        - 2-4 paragraphs depending on content
-
-        Include inline citations referencing the sources by number.
-        """
-
-        messages = [
-            SystemMessage(content="You are a research report writer that creates well-structured, evidence-based sections with proper citations."),
-            HumanMessage(content=section_prompt)
-        ]
-
-        response = await llm.ainvoke(messages)
-        section_content = response.content if hasattr(response, 'content') else str(response)
-
-        written_sections.append({
-            "title": section_title,
-            "content": section_content,
-            "sources": sources_list
-        })
+    # Write all sections in parallel
+    print(f"write_sections_with_citations: writing {len(sections)} sections in parallel")
+    tasks = [
+        write_single_section(section, topic, research_by_subtopic, agent_config.min_credibility_score)
+        for section in sections
+    ]
+    written_sections = await asyncio.gather(*tasks)
 
     print(f"write_sections_with_citations: completed {len(written_sections)} sections")
 
@@ -565,18 +581,23 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
         contentType="text/markdown"
     )
 
-    # Save report to MongoDB
+    # Generate report_id if not exists
     report_id = state.get("report_id", "")
+    if not report_id:
+        report_id = f"report_{uuid.uuid4().hex[:12]}"
+        print(f"write_sections_with_citations: generated new report_id={report_id}")
+
     new_version_id = state.get("version_id", 0) + 1
 
-    if report_id:
-        try:
-            await save_report(report_id, new_version_id, full_report)
-            print(f"write_sections_with_citations: saved report {report_id} version {new_version_id} to MongoDB")
-        except Exception as e:
-            print(f"write_sections_with_citations: failed to save report to MongoDB: {e}")
+    # Save report to MongoDB
+    try:
+        await save_report(report_id, new_version_id, full_report)
+        print(f"write_sections_with_citations: saved report {report_id} version {new_version_id} to MongoDB")
+    except Exception as e:
+        print(f"write_sections_with_citations: failed to save report to MongoDB: {e}")
 
     return {
+        "report_id": report_id,
         "report_sections": written_sections,
         "report_content": full_report,
         "report_references": unique_sources,
@@ -677,26 +698,16 @@ async def identify_report_gaps(state: dict) -> dict:
     }
 
 
-def collect_user_feedback(state: dict) -> dict:
+def prompt_for_feedback(state: dict) -> dict:
     """
-    Collect user feedback on the report after initial generation.
-    Uses interrupt to pause and wait for user input.
-    Appends feedback to list for tracking multiple rounds of feedback.
+    Display the feedback prompt to the user as an AI message.
+    This runs before collect_user_feedback to show the prompt in the message stream.
     """
-    report_sections = state.get("report_sections", [])
     user_feedback_list = state.get("user_feedback", [])
-    feedback_incorporated_list = state.get("feedback_incorporated", [])
 
-    print(f"collect_user_feedback: waiting for user feedback (round {len(user_feedback_list) + 1})")
+    print(f"prompt_for_feedback: displaying prompt (round {len(user_feedback_list) + 1})")
 
-    # Build section list for user reference
-    section_titles = [s.get("title", "Untitled") for s in report_sections]
-    section_list = "\n".join(f"  {i+1}. {title}" for i, title in enumerate(section_titles))
-
-    feedback_prompt = f"""
-I've completed the report. Here are the sections:
-
-{section_list}
+    feedback_prompt = f"""I've completed the report.
 
 Would you like me to:
 - Expand on any specific areas?
@@ -704,11 +715,26 @@ Would you like me to:
 - Clarify any points?
 - Make any other improvements?
 
-Please provide your feedback, or type 'done' if the report is satisfactory.
-"""
+Please provide your feedback, or type 'done' if the report is satisfactory."""
 
-    # Interrupt and wait for user feedback
-    user_input = interrupt(feedback_prompt)
+    return {
+        "messages": [AIMessage(content=feedback_prompt)]
+    }
+
+
+def collect_user_feedback(state: dict) -> dict:
+    """
+    Collect user feedback on the report after initial generation.
+    Uses interrupt to pause and wait for user input.
+    Appends feedback to list for tracking multiple rounds of feedback.
+    """
+    user_feedback_list = state.get("user_feedback", [])
+    feedback_incorporated_list = state.get("feedback_incorporated", [])
+
+    print(f"collect_user_feedback: waiting for user feedback (round {len(user_feedback_list) + 1})")
+
+    # Interrupt and wait for user feedback (no prompt, it was already displayed)
+    user_input = interrupt("Waiting for user feedback...")
 
     print(f"collect_user_feedback: received feedback '{user_input[:50]}...'")
 
@@ -734,7 +760,6 @@ async def incorporate_feedback(state: dict) -> dict:
     user_feedback_list = state.get("user_feedback", [])
     feedback_incorporated_list = state.get("feedback_incorporated", [])
     report_content = state.get("report_content", "")
-    topic = state.get("topic", "")
     sub_researchers = state.get("sub_researchers", [])
 
     # Find unincorporated feedback
@@ -802,7 +827,9 @@ async def incorporate_feedback(state: dict) -> dict:
     report_id = state.get("report_id", "")
     new_version_id = state.get("version_id", 0) + 1
 
-    if report_id:
+    if not report_id:
+        print("[Error] incorporate_feedback: no report_id found in state, skipping MongoDB save")
+    else:
         try:
             await save_report(report_id, new_version_id, revised_report)
             print(f"incorporate_feedback: saved report {report_id} version {new_version_id} to MongoDB")
@@ -814,7 +841,7 @@ async def incorporate_feedback(state: dict) -> dict:
         "feedback_incorporated": new_incorporated_list,
         "version_id": new_version_id,
         "report_history": state.get("report_history", []) + [new_version_id],
-        "messages": [AIMessage(content=f"I've revised the report based on your feedback. {len(unincorporated_feedback)} improvement(s) have been addressed.")]
+        "messages": [AIMessage(revised_report), AIMessage(content=f"I've revised the report based on your feedback. {len(unincorporated_feedback)} improvement(s) have been addressed.")]
     }
 
 
