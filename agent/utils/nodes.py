@@ -318,8 +318,7 @@ async def generate_subtopics(state: dict, config: RunnableConfig) -> dict:
 
     subtopic_list = "\n".join(f"{i + 1}. {st}" for i, st in enumerate(subtopics))
 
-    subtopic_alert_message = f"""
-    I've come up with {len(subtopics)} research areas on this topic:
+    subtopic_alert_message = f"""I've come up with {len(subtopics)} research areas on this topic:
 
     {subtopic_list}
     """
@@ -345,8 +344,7 @@ async def verify_cross_references(state: dict, config: RunnableConfig) -> dict:
         print("verify_cross_references: cross-verification disabled, skipping")
         return {
             "verified_claims": [],
-            "conflicting_info": [],
-            "messages": [AIMessage(content="Cross-reference verification skipped (disabled in configuration).")]
+            "conflicting_info": []
         }
 
     sub_researchers = state.get("sub_researchers", [])
