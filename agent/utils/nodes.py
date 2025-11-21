@@ -1,12 +1,14 @@
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langgraph.types import RunnableConfig, interrupt
 from pydantic import create_model
-from utils.model import llm
+from utils.model import llm, evaluator_llm
 from utils.subresearcher import subresearcher_graph
 from utils.verification import verify_research_cross_references
-from utils.version_control import save_report
-from utils.configuration import get_config_from_configurable
+from utils.db import save_report
+from utils.configuration import get_config_from_configurable, tavily_client
+from utils.tools import report_tools
 import asyncio, json, re, uuid
+
 
 
 
@@ -459,6 +461,26 @@ async def generate_outline(state: dict) -> dict:
     }
 
 
+async def search_for_section_sources(section_title: str, topic: str, num_results: int = 3) -> list[dict]:
+    """
+    Perform a web search to find additional sources for a section.
+    Used when existing research doesn't provide enough sources.
+    """
+    search_query = f"{topic} {section_title}"
+    print(f"    Searching for additional sources: '{search_query[:50]}...'")
+
+    try:
+        loop = asyncio.get_event_loop()
+        search_results = await loop.run_in_executor(
+            None,
+            lambda: tavily_client.search(query=search_query, max_results=num_results)
+        )
+        return search_results.get("results", [])
+    except Exception as e:
+        print(f"    Search failed: {e}")
+        return []
+
+
 async def write_single_section(
     section: dict,
     topic: str,
@@ -468,9 +490,11 @@ async def write_single_section(
     """
     Write a single section of the report with citations.
     This function is called in parallel for each section.
+    If insufficient sources exist, performs additional web search.
     """
     section_title = section.get("title", "")
     section_subtopics = section.get("subtopics", [])
+    MIN_SOURCES_THRESHOLD = 2  # Minimum sources needed before searching for more
 
     print(f"  Writing section: {section_title}")
 
@@ -491,9 +515,26 @@ async def write_single_section(
                 relevant_research += f"\nSource: {source} (credibility: {credibility:.2f})\n{findings}\n"
                 sources_list.append(source)
 
-    # If no specific research, use general overview
+    # If insufficient sources, search for more
+    if len(sources_list) < MIN_SOURCES_THRESHOLD:
+        print(f"    Section '{section_title}' has only {len(sources_list)} sources, searching for more...")
+        additional_results = await search_for_section_sources(section_title, topic)
+
+        for result in additional_results:
+            source_url = result.get("url", "")
+            source_title = result.get("title", "Untitled")
+            source_content = result.get("content", "")
+
+            if source_content:
+                source_key = f"{source_title} ({source_url})"
+                relevant_research += f"\nSource: {source_key} (credibility: 0.70)\n{source_content[:500]}...\n"
+                sources_list.append(source_key)
+
+        print(f"    Now have {len(sources_list)} sources for section")
+
+    # If still no research, note it
     if not relevant_research:
-        relevant_research = "General context based on overall research findings."
+        relevant_research = "Limited sources available. Provide general analysis based on the topic."
 
     section_prompt = f"""
     Write the "{section_title}" section of a research report on: {topic}
@@ -525,6 +566,8 @@ async def write_single_section(
     }
 
 
+# TODO: Improve citation quality
+# Map it to the right claim properly
 async def write_sections_with_citations(state: dict, config: RunnableConfig) -> dict:
     """
     Write each section of the report with proper inline citations in parallel.
@@ -638,15 +681,16 @@ async def evaluate_report(state: dict) -> dict:
     """
 
     messages = [
-        SystemMessage(content="You are an expert research report evaluator that provides detailed, constructive feedback."),
+        SystemMessage(content="You are an expert research report evaluator that provides detailed, constructive feedback. Be strict but fair in your scoring."),
         HumanMessage(content=evaluation_prompt)
     ]
 
-    response = await llm.ainvoke(messages)
+    # Use external evaluator (Gemini) for unbiased evaluation
+    print("evaluate_report: using external evaluator (Gemini) for unbiased scoring")
+    response = await evaluator_llm.ainvoke(messages)
     response_text = response.content if hasattr(response, 'content') else str(response)
 
     # Extract total score
-    import re
     total_match = re.search(r'TOTAL:\s*(\d+)', response_text)
     score = int(total_match.group(1)) if total_match else 75
 

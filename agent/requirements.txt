@@ -1,5 +1,6 @@
 langchain-openai
 langchain-core
+langchain_google_genai
 langgraph
 pydantic
 tavily-python
