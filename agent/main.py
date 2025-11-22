@@ -1,15 +1,23 @@
-from deep_researcher import agent
+from deep_researcher import create_agent
 from langchain_core.messages import HumanMessage
+from langgraph.types import Command
 import asyncio
 
 async def chat():
-    # print(agent.get_graph().draw_mermaid_png())
+    # Create agent with checkpointer for interrupt/resume support
+    agent = create_agent(use_checkpointer=True)
     agent.get_graph().print_ascii()
+
+    thread_counter = 0
 
     while True:
         user_input = input("User: ")
         if user_input.lower() in ["exit", "quit", "bye"]:
             break
+
+        # New thread for each conversation
+        thread_counter += 1
+        config = {"configurable": {"thread_id": str(thread_counter)}}
 
         # Initialize state with user's topic
         state = {
@@ -21,38 +29,40 @@ async def chat():
             "user_responses": []
         }
 
-        # Run the graph, handling interrupts for clarification questions
-        config = {"configurable": {"thread_id": "1"}}
+        # Initial invocation
+        result = await agent.ainvoke(state, config)
+
+        # Handle interrupt/resume loop
         while True:
-            result = await agent.ainvoke(state, config)
+            graph_state = agent.get_state(config)
+            next_nodes = graph_state.next
 
-            # Check if the graph is waiting for clarification (interrupted before collect_response)
-            next_node = agent.get_state(config).next
-            if next_node and "collect_response" in next_node:
-                # Get the clarification question
-                clarification_questions = result.get("clarification_questions", [])
-                if clarification_questions:
-                    latest_question = clarification_questions[-1]
-                    print(f"\nAgent: {latest_question}")
-
-                    # Get user's response to the clarification question
-                    clarification_response = input("User: ")
-
-                    if clarification_response.lower() in ["exit", "quit", "bye"]:
-                        return
-
-                    # Update state with user's clarification response
-                    messages = result.get("messages", [])
-                    messages.append(HumanMessage(content=clarification_response))
-                    state = {**result, "messages": messages}
-                    continue
-            else:
+            if not next_nodes:
                 # Graph completed, show final result
                 if "messages" in result and result["messages"]:
                     final_message = result["messages"][-1]
                     if hasattr(final_message, 'content'):
-                        print(f"\n{final_message.content}\n")
+                        print(f"\nAgent: {final_message.content}\n")
                 break
+
+            # Handle clarification interrupt
+            if "collect_response" in next_nodes:
+                clarification_questions = result.get("clarification_questions", [])
+                if clarification_questions:
+                    print(f"\nAgent: {clarification_questions[-1]}")
+
+            # Handle feedback interrupt
+            elif "collect_feedback" in next_nodes:
+                # Prompt already shown via prompt_for_feedback node
+                pass
+
+            # Get user input for resume
+            user_response = input("User: ")
+            if user_response.lower() in ["exit", "quit", "bye"]:
+                return
+
+            # Resume with user's response
+            result = await agent.ainvoke(Command(resume=user_response), config)
 
 if __name__ == "__main__":
     asyncio.run(chat())

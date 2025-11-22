@@ -144,8 +144,8 @@ async def analyze_report_gaps(
 
     {research_summary}
 
-    Report excerpt (first 1500 chars):
-    {report_content[:1500]}
+    Report content:
+    {report_content[:6000]}
 
     Identify gaps in the report:
     1. **missing_topic**: Important aspects mentioned in research but not covered in report

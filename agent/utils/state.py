@@ -59,3 +59,7 @@ class UnifiedAgentState(TypedDict):
     # Cross-reference verification fields
     verified_claims: list[dict]  # Claims verified across multiple sources
     conflicting_info: list[dict]  # Information that conflicts across sources
+
+    # Intent routing fields
+    user_intent: str  # "new_research", "retrieve_report", or "list_reports"
+    intent_report_id: str  # Extracted report ID from user query

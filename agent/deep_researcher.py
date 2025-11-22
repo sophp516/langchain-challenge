@@ -6,19 +6,28 @@ from langgraph.checkpoint.memory import MemorySaver
 
 def create_agent(use_checkpointer=False):
     """
-    Create and compile the enhanced agent graph with cross-reference verification and user feedback.
+    Create and compile the enhanced agent graph with intent routing, tool support,
+    cross-reference verification and user feedback.
 
     Flow:
-    1. Topic inquiry + clarification
-    2. Multi-layer research on subtopics
-    3. Cross-reference verification
-    4. Outline generation
-    5. Section-by-section writing (full report generated)
-    6. User feedback loop (with interrupt)
-    7. Incorporate feedback (if requested)
-    8. Finalize
+    1. Check user intent (research vs report retrieval)
+    2. If report tools: call tools -> execute -> format -> back to intent check
+    3. If research: Topic inquiry + clarification
+    4. Multi-layer research on subtopics
+    5. Cross-reference verification
+    6. Outline generation
+    7. Section-by-section writing (full report generated)
+    8. User feedback loop (with interrupt)
+    9. Incorporate feedback (if requested)
+    10. Finalize
     """
     workflow = StateGraph(UnifiedAgentState)
+
+    # Intent Routing Nodes
+    workflow.add_node("check_user_intent", check_user_intent)
+    workflow.add_node("call_report_tools", call_report_tools)
+    workflow.add_node("execute_tools", report_tool_node)
+    workflow.add_node("format_tool_response", format_tool_response)
 
     # Topic Inquiry Nodes
     workflow.add_node("check_initial_context", check_initial_context)
@@ -35,6 +44,7 @@ def create_agent(use_checkpointer=False):
     workflow.add_node("write_sections", write_sections_with_citations)
 
     # User Feedback Nodes (after full report is generated)
+    workflow.add_node("display_report", display_final_report)
     workflow.add_node("prompt_for_feedback", prompt_for_feedback)
     workflow.add_node("collect_feedback", collect_user_feedback)
     workflow.add_node("incorporate_feedback", incorporate_feedback)
@@ -43,8 +53,30 @@ def create_agent(use_checkpointer=False):
     workflow.add_node("evaluate_report", evaluate_report)
     workflow.add_node("identify_gaps", identify_report_gaps)
 
-    # Entry Point
-    workflow.set_entry_point("check_initial_context")
+    # Entry Point - Intent Check
+    workflow.set_entry_point("check_user_intent")
+
+    # Intent Routing
+    workflow.add_conditional_edges(
+        "check_user_intent",
+        route_after_intent_check,
+        {
+            "research": "check_initial_context",
+            "tools": "call_report_tools"
+        }
+    )
+
+    # Tool Flow: call_report_tools -> check for tool calls -> execute -> format -> END
+    workflow.add_conditional_edges(
+        "call_report_tools",
+        should_continue_tools,
+        {
+            "execute": "execute_tools",
+            "end": END
+        }
+    )
+    workflow.add_edge("execute_tools", "format_tool_response")
+    workflow.add_edge("format_tool_response", END)
 
     # Topic Inquiry Flow
     workflow.add_conditional_edges(
@@ -81,22 +113,23 @@ def create_agent(use_checkpointer=False):
         "evaluate_report",
         route_after_evaluation,
         {
-            "finalize": "prompt_for_feedback",
+            "finalize": "display_report",
             "revise": "identify_gaps"
         }
     )
 
-    # Gap identification can lead to regenerating outline or proceeding to user feedback
+    # Gap identification can lead to regenerating outline or proceeding to display report
     workflow.add_conditional_edges(
         "identify_gaps",
         route_after_gap_identification,
         {
             "regenerate": "generate_outline",
-            "finalize": "prompt_for_feedback"
+            "finalize": "display_report"
         }
     )
 
-    # Show feedback prompt, then collect feedback
+    # Display report first, then show feedback prompt, then collect feedback
+    workflow.add_edge("display_report", "prompt_for_feedback")
     workflow.add_edge("prompt_for_feedback", "collect_feedback")
 
     # User Feedback Loop (after LLM evaluation passes)

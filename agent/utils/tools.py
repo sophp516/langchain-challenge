@@ -122,8 +122,13 @@ async def list_all_reports(limit: int = 20) -> dict:
             {"$limit": limit}
         ]
 
-        cursor = reports_collection.aggregate(pipeline)
-        reports = await cursor.to_list(length=limit)
+        # AsyncMongoClient: await aggregate() to get cursor, then iterate
+        cursor = await reports_collection.aggregate(pipeline)
+        reports = []
+        async for doc in cursor:
+            reports.append(doc)
+            if len(reports) >= limit:
+                break
 
         report_list = [
             {

@@ -12,6 +12,7 @@ class SubResearcherGraphState(TypedDict):
     """State for the subresearcher subgraph"""
     subtopic_id: int
     subtopic: str
+    main_topic: str  # The parent topic for context in searches
     research_results: dict[str, str]
     research_depth: int  # Current depth layer (1, 2, or 3)
     source_credibilities: dict[str, float]  # Track credibility scores
@@ -72,12 +73,18 @@ async def conduct_initial_research(state: SubResearcherGraphState) -> SubResearc
     - Extract and summarize findings
     """
     subtopic = state["subtopic"]
+    main_topic = state.get("main_topic", "")
     current_depth = state.get("research_depth", 1)
 
     print(f"[Layer {current_depth}] Starting research on: {subtopic}")
 
     # Perform Tavily search (wrap in thread to avoid blocking)
+    # Use subtopic directly since it should now include main topic constraints
+    # But if main_topic is provided and subtopic seems generic, enhance the query
     search_query = subtopic
+    if main_topic and len(subtopic.split()) < 5:
+        # Subtopic is short/generic, prepend main topic context
+        search_query = f"{main_topic}: {subtopic}"
     search_func = partial(
         tavily_client.search,
         query=search_query,
