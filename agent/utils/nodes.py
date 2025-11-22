@@ -157,22 +157,41 @@ async def format_tool_response(state: dict) -> dict:
         if tool_result.get("error"):
             response_text = f"Error: {tool_result['error']}"
         elif tool_result.get("found") and tool_result.get("content"):
-            response_text = f"""**Report: {tool_result.get('report_id')}** (Version {tool_result.get('version_id')})
-Created: {tool_result.get('created_at')}
+            # Format report with better visual hierarchy
+            report_id = tool_result.get('report_id', 'Unknown')
+            version_id = tool_result.get('version_id', 'N/A')
+            created_at = tool_result.get('created_at', 'Unknown date')
+            content = tool_result.get('content', 'No content available')
+            
+            # Create a nicely formatted header with metadata
+            response_text = f"""## 📄 Report: {report_id}
 
-{tool_result.get('content', 'No content available')}"""
+**Version:** {version_id}  
+**Created:** {created_at}
+
+---
+
+{content}"""
         elif tool_result.get("versions"):
-            versions_text = "\n".join([
-                f"- Version {v['version_id']} ({v['created_at']}): {v['content_preview']}"
-                for v in tool_result.get("versions", [])
+            report_id = tool_result.get('report_id', 'Unknown')
+            versions = tool_result.get("versions", [])
+            versions_text = "\n\n".join([
+                f"### Version {v['version_id']}\n**Created:** {v['created_at']}\n\n{v.get('content_preview', 'No preview available')}"
+                for v in versions
             ])
-            response_text = f"**Versions of {tool_result.get('report_id')}:**\n{versions_text}"
+            response_text = f"""## 📋 Versions of Report: {report_id}
+
+{versions_text}"""
         elif tool_result.get("reports"):
+            total_reports = tool_result.get('total_reports', 0)
+            reports = tool_result.get("reports", [])
             reports_text = "\n".join([
-                f"- **{r['report_id']}** (v{r['latest_version']}) - {r['content_preview']}"
-                for r in tool_result.get("reports", [])
+                f"- **{r['report_id']}** | Version: {r['latest_version']} | Created: {r['created_at']}"
+                for r in reports
             ])
-            response_text = f"**Available Reports ({tool_result.get('total_reports')}):**\n{reports_text}"
+            response_text = f"""## 📚 Available Reports ({total_reports})
+
+{reports_text}"""
         elif tool_result.get("found") == False:
             response_text = tool_result.get("error", "Report not found.")
         else:
@@ -329,23 +348,32 @@ def generate_clarification_question(state: dict, config: RunnableConfig) -> dict
 
     {context if clarification_rounds > 0 else "This is the initial topic."}
 
-    IMPORTANT RULES:
-    1. DO NOT ask about information already present in the topic
-    2. If the topic mentions a time period (e.g., "2026"), don't ask "what time period?"
-    3. If the topic mentions a subject (e.g., "MMORPGs"), don't ask "what type of games?"
-    4. Only ask about truly MISSING information that would significantly improve research quality
-    5. If the topic is already specific enough to research, respond with "ENOUGH_CONTEXT"
-
+    CRITICAL RULES - ONLY ask for information that CANNOT be researched:
+    1. DO NOT ask about information already present in the topic or previous responses
+    2. DO NOT ask about standard metrics, criteria, definitions, or methodologies - these can be researched
+    3. DO NOT ask "What metrics are used?" or "What criteria determine X?" - research can find this
+    4. DO NOT ask "How is X measured?" or "What are standard practices?" - research can answer this
+    5. DO NOT ask about definitions or technical terms - research can provide these
+    
+    ONLY ask for:
+    - User-specific preferences (e.g., "Which specific items/entities do you want to compare?")
+    - Missing constraints that are user choices (e.g., "What time period?" if not mentioned)
+    - User goals or use cases (e.g., "What will you use this research for?")
+    - Ambiguities that require user input (e.g., "Do you mean X or Y?" when both are possible)
+    
+    If the topic has a clear subject and at least one constraint (time, category, scope, etc.), respond with "ENOUGH_CONTEXT"
+    
     Examples:
-    - Topic "MMORPG games in 2026" → ENOUGH_CONTEXT (already has subject + time)
-    - Topic "games" → Ask about genre, platform, or time period
-    - Topic "best practices" → Ask about which domain/field
+    - Topic "most popular kpop song of 2025" + user said "chart success and social impact" → ENOUGH_CONTEXT (agent can research what metrics are used)
+    - Topic "MMORPG games in 2026" → ENOUGH_CONTEXT (has subject + time)
+    - Topic "games" → Ask "What type of games or time period?" (missing constraint)
+    - Topic "best practices" → Ask "Which domain or field?" (missing subject scope)
 
     Return ONLY the question (or "ENOUGH_CONTEXT"), nothing else.
     """
     
     messages = [
-        SystemMessage(content="You are a helpful research assistant that asks clarifying questions to better understand research topics."),
+        SystemMessage(content="You are a helpful research assistant. You ONLY ask for information that requires user input and cannot be discovered through research. You do NOT ask about standard metrics, criteria, definitions, or methodologies - these can be researched. Be conservative - if the topic has a clear subject and constraints, mark it as ENOUGH_CONTEXT."),
         HumanMessage(content=clarification_prompt)
     ]
 
@@ -433,18 +461,28 @@ Your task:
 1. Decide whether the information is sufficient to finalize the topic and proceed with research.
 2. Provide your recommended finalized topic regardless of sufficiency.
 
-Definition of sufficiency:
-- Topic is specific and well-scoped.
-- Clear research directions exist.
-- Enough context is present to create subtopics, research steps, and a detailed report.
+Definition of sufficiency (BE LENIENT):
+- Topic has a clear subject/entity
+- Topic has at least one constraint (time period, category, scope, criteria, etc.)
+- You can identify what to research, even if some details need to be discovered through research
+- Standard metrics, criteria, definitions, and methodologies can be researched - don't require them upfront
 
-IMPORTANT:
+IMPORTANT - Be generous in marking as sufficient:
+- If the topic mentions criteria like "chart success and social impact", that's ENOUGH - you can research what metrics are used for these
+- If the topic has subject + constraint, it's sufficient even if some technical details are missing
+- Only mark as insufficient if the topic is truly vague or missing fundamental constraints
+
+Examples:
+- "most popular kpop song of 2025" + "chart success and social impact" → SUFFICIENT (can research metrics)
+- "MMORPG games in 2026" → SUFFICIENT (has subject + time)
+- "games" → INSUFFICIENT (too vague, no constraint)
+
 Return ONLY the following fields in JSON form for structured parsing:
 - `is_sufficient`: true/false
 - `finalized_topic`: string
 """
     messages = [
-        SystemMessage(content="You are a research coordinator evaluating the completeness of context."),
+        SystemMessage(content="You are a research coordinator evaluating context. Be LENIENT - if a topic has a clear subject and constraints, mark it as sufficient even if some technical details are missing. The agent can research standard metrics, criteria, and methodologies. Only mark as insufficient if truly vague or missing fundamental constraints."),
         HumanMessage(content=validation_prompt)
     ]
 
@@ -490,29 +528,51 @@ async def generate_subtopics(state: dict, config: RunnableConfig) -> dict:
     structured_llm = llm.with_structured_output(SubtopicsOutput)
 
     prompt = f"""
-    You are a helpful assistant that generates subtopics for a research report.
-    Come up with exactly {agent_config.num_subtopics} subtopics for the given topic.
+    You are a research strategist that generates optimal subtopics for comprehensive research.
+    Generate exactly {agent_config.num_subtopics} subtopics for the given topic.
 
     Topic: {topic}
 
-    IMPORTANT RULES:
-    1. Each subtopic MUST preserve the core constraints of the main topic (time periods, specific subjects, scope limits)
-    2. Subtopics should be SPECIFIC and SEARCHABLE, not generic categories
-    3. If the topic mentions a specific time (e.g., "2026"), each subtopic must include that constraint
-    4. If the topic mentions specific subjects (e.g., "MMORPGs"), each subtopic must focus on that subject
+    FIRST, analyze the topic type and choose the best research approach:
 
-    BAD example for "MMORPG games releasing in 2026":
-    - "Game Mechanics" (too generic, loses 2026 constraint)
-    - "Player Engagement Strategies" (generic, not about 2026 releases)
+    **APPROACH A - Entity-Focused** (use when topic is about multiple items/entities):
+    Best for: "Games releasing in 2026", "Top tech companies", "Countries affected by X"
+    Strategy: Research specific entities individually, then compare
+    Example for "MMORPGs releasing in 2026":
+    - "Ashes of Creation 2026 release - features, development status, community reception"
+    - "Throne and Liberty 2026 - gameplay systems, publisher, launch expectations"
+    - "Blue Protocol Western release 2026 - localization, content differences, hype"
+    - "Comparison of business models across 2026 MMORPG releases"
 
-    GOOD example for "MMORPG games releasing in 2026":
-    - "List of confirmed MMORPG titles scheduled for 2026 release"
-    - "Announced features and gameplay mechanics in upcoming 2026 MMORPGs"
-    - "Developer studios with MMORPG projects targeting 2026 launch"
+    **APPROACH B - Thematic/Analytical** (use when topic needs conceptual analysis):
+    Best for: "Effects of climate change", "Best practices for X", "How does Y work"
+    Strategy: Break down by themes, causes, effects, or analytical angles
+    Example for "Impact of AI on healthcare":
+    - "AI diagnostic tools and accuracy improvements in medical imaging"
+    - "AI-powered drug discovery and development timelines"
+    - "Ethical concerns and regulatory challenges of AI in healthcare"
+
+    **APPROACH C - Hybrid** (combine both when appropriate):
+    Best for: Complex topics that benefit from both specific examples AND thematic analysis
+    Example for "Electric vehicles market 2025":
+    - "Tesla Model 3 and Model Y - 2025 updates and market position"
+    - "BYD and Chinese EV manufacturers expanding globally in 2025"
+    - "Charging infrastructure developments across major markets"
+    - "Price trends and affordability of EVs in 2025"
+
+    RULES:
+    1. Choose the approach that will yield the MOST USEFUL and SEARCHABLE subtopics
+    2. Each subtopic MUST preserve core constraints (time periods, specific subjects, scope)
+    3. Subtopics should be specific enough to return good search results
+    4. Avoid generic/vague subtopics like "Overview" or "General trends"
+    5. For entity-focused topics, try to identify SPECIFIC entities (names, titles, companies) when possible
+    6. Ensure subtopics are distinct and don't overlap significantly
+
+    Generate {agent_config.num_subtopics} subtopics that will produce the most comprehensive and useful research.
     """
 
     llm_response = await structured_llm.ainvoke([
-        SystemMessage(content=f"You are a helpful assistant that generates exactly {agent_config.num_subtopics} subtopics for a research report."),
+        SystemMessage(content=f"You are a research strategist that analyzes topics and generates exactly {agent_config.num_subtopics} optimal subtopics. You choose between entity-focused, thematic, or hybrid approaches based on what will yield the best research results."),
         HumanMessage(content=prompt)
     ])
 
@@ -803,20 +863,31 @@ async def write_single_section(
     section_prompt = f"""
     Write the "{section_title}" section of a research report on: {topic}
 
-    Research findings:
+    SOURCES (numbered for citation):
     {relevant_research[:3000]}
     {gaps_instruction}
 
+    **STRICT GROUNDING RULES - FOLLOW EXACTLY:**
+    1. ONLY write about information that appears in the SOURCES above
+    2. Every factual claim MUST have a citation [1], [2], etc. pointing to a source above
+    3. DO NOT invent, infer, or assume any names, titles, dates, statistics, or facts
+    4. DO NOT use placeholder names like "XYZ", "Company A", "the product", etc.
+    5. If the sources don't mention something specific, DO NOT mention it
+    6. If you're unsure whether something is in the sources, leave it out
+    7. It's better to write less content that is accurate than more content that is fabricated
+
+    **WHAT TO DO IF SOURCES ARE LIMITED:**
+    - Focus only on what IS mentioned in the sources
+    - Use phrases like "According to [source]..." or "Research indicates..."
+    - Acknowledge gaps: "Available research focuses on X, while Y remains less documented"
+    - DO NOT fill gaps with invented information
+
     Write a well-structured section with:
-    - Clear topic sentences
-    - Evidence from sources with inline citations like [1], [2], etc.
-    - Logical flow and transitions
-    - 2-4 paragraphs depending on content
-    - Specific facts, dates, names, and details (not vague statements)
+    - Clear topic sentences grounded in source material
+    - Every claim backed by a citation
+    - 2-4 paragraphs depending on available source content
 
-    Include inline citations referencing the sources by number.
-
-    IMPORTANT: Do NOT include the section title or any header in your response. Start directly with the content.
+    IMPORTANT: Do NOT include the section title. Start directly with the content.
     """
 
     messages = [
@@ -834,8 +905,65 @@ async def write_single_section(
     }
 
 
-# TODO: Improve citation quality
-# Map it to the right claim properly
+async def verify_section_grounding(section_content: str, sources_text: str, section_title: str) -> dict:
+    """
+    Verify that a section's content is properly grounded in its sources.
+    Returns a grounding score and flags potential hallucinations.
+    """
+    GroundingOutput = create_model(
+        'GroundingOutput',
+        grounding_score=(float, ...),  # 0.0-1.0
+        ungrounded_claims=(list[str], ...),
+        has_placeholder_names=(bool, ...),
+        placeholder_examples=(list[str], ...)
+    )
+
+    structured_llm = llm.with_structured_output(GroundingOutput)
+
+    verification_prompt = f"""
+    Verify if the following section content is properly grounded in the provided sources.
+
+    SECTION: {section_title}
+    CONTENT:
+    {section_content[:2000]}
+
+    SOURCES:
+    {sources_text[:2000]}
+
+    Check for:
+    1. Claims that have no support in the sources
+    2. Names, titles, dates, or statistics not mentioned in sources
+    3. Placeholder names like "XYZ", "Company A", "Song A", "the product", etc.
+
+    Return:
+    - grounding_score: 0.0 (completely ungrounded) to 1.0 (fully grounded)
+    - ungrounded_claims: List of specific claims that appear fabricated
+    - has_placeholder_names: True if placeholder names detected
+    - placeholder_examples: Examples of placeholder names found
+    """
+
+    try:
+        response = await structured_llm.ainvoke([
+            SystemMessage(content="You verify if content is grounded in sources. Flag any fabricated information."),
+            HumanMessage(content=verification_prompt)
+        ])
+
+        return {
+            "grounding_score": response.grounding_score,
+            "ungrounded_claims": response.ungrounded_claims,
+            "has_placeholder_names": response.has_placeholder_names,
+            "placeholder_examples": response.placeholder_examples
+        }
+    except Exception as e:
+        print(f"verify_section_grounding: verification failed: {e}")
+        return {
+            "grounding_score": 0.5,
+            "ungrounded_claims": [],
+            "has_placeholder_names": False,
+            "placeholder_examples": []
+        }
+
+
 async def write_sections_with_citations(state: dict, config: RunnableConfig) -> dict:
     """
     Write each section of the report with proper inline citations in parallel.
@@ -1003,13 +1131,14 @@ async def identify_report_gaps(state: dict) -> dict:
     # Use gap analysis to find issues
     gaps = await analyze_report_gaps(topic, report_content, sub_researchers)
 
-    # Convert ResearchGap objects to dicts for state storage
+    # Convert ResearchGap objects to dicts for state storage (including affected_sections)
     gaps_dicts = [
         {
             "gap_description": gap.gap_description,
             "gap_type": gap.gap_type,
             "priority": gap.priority,
-            "follow_up_query": gap.follow_up_query
+            "follow_up_query": gap.follow_up_query,
+            "affected_sections": gap.affected_sections
         }
         for gap in gaps
     ]
@@ -1073,6 +1202,237 @@ async def identify_report_gaps(state: dict) -> dict:
     }
 
 
+async def revise_sections(state: dict, config: RunnableConfig) -> dict:
+    """
+    Targeted revision: Only rewrite sections that are affected by identified gaps.
+    Much more efficient than regenerating the entire report.
+    """
+    agent_config = get_config_from_configurable(config.get("configurable", {}))
+
+    topic = state.get("topic", "")
+    report_sections = state.get("report_sections", [])
+    research_gaps = state.get("research_gaps", [])
+    sub_researchers = state.get("sub_researchers", [])
+    revision_count = state.get("revision_count", 0)
+
+    print(f"revise_sections: starting targeted revision (revision {revision_count})")
+
+    # Collect all affected sections from gaps
+    sections_to_revise = set()
+    gaps_by_section = {}
+
+    for gap in research_gaps:
+        affected = gap.get("affected_sections", [])
+        priority = gap.get("priority", "low")
+
+        # Only consider high/medium priority gaps
+        if priority not in ["high", "medium"]:
+            continue
+
+        for section_title in affected:
+            sections_to_revise.add(section_title)
+            if section_title not in gaps_by_section:
+                gaps_by_section[section_title] = []
+            gaps_by_section[section_title].append(gap)
+
+    print(f"revise_sections: {len(sections_to_revise)} sections need revision: {list(sections_to_revise)}")
+
+    if not sections_to_revise:
+        print("revise_sections: no sections to revise, returning unchanged")
+        return {}
+
+    # Build research lookup (same as write_sections_with_citations)
+    research_by_subtopic = {}
+    for researcher in sub_researchers:
+        subtopic = researcher.get("subtopic", "")
+        research_by_subtopic[subtopic] = {
+            "results": researcher.get("research_results", {}),
+            "credibilities": researcher.get("source_credibilities", {})
+        }
+
+    # Add gap research to pool
+    gap_research = {}
+    for researcher in sub_researchers:
+        subtopic = researcher.get("subtopic", "")
+        if subtopic.startswith("[Gap Research]"):
+            for source, content in researcher.get("research_results", {}).items():
+                gap_research[source] = content
+
+    if gap_research:
+        research_by_subtopic["[Gap Research]"] = {
+            "results": gap_research,
+            "credibilities": {s: 0.7 for s in gap_research.keys()}
+        }
+
+    # Revise only affected sections
+    revised_sections = []
+    tasks = []
+
+    for section in report_sections:
+        section_title = section.get("title", "")
+
+        if section_title in sections_to_revise:
+            # This section needs revision - pass its specific gaps
+            section_gaps = gaps_by_section.get(section_title, [])
+            print(f"  Revising section: {section_title} ({len(section_gaps)} gaps)")
+
+            # Create a modified section dict with subtopics for research lookup
+            section_dict = {
+                "title": section_title,
+                "subtopics": section.get("subtopics", []),
+                "key_questions": section.get("key_questions", []),
+                "original_content": section.get("content", "")
+            }
+
+            tasks.append(revise_single_section(
+                section_dict,
+                topic,
+                research_by_subtopic,
+                agent_config.min_credibility_score,
+                section_gaps
+            ))
+        else:
+            # Keep section unchanged
+            print(f"  Keeping section unchanged: {section_title}")
+            revised_sections.append(section)
+
+    # Execute revisions in parallel
+    if tasks:
+        revised_results = await asyncio.gather(*tasks)
+        # Merge revised sections in correct order
+        revised_idx = 0
+        final_sections = []
+        for section in report_sections:
+            section_title = section.get("title", "")
+            if section_title in sections_to_revise:
+                final_sections.append(revised_results[revised_idx])
+                revised_idx += 1
+            else:
+                final_sections.append(section)
+        revised_sections = final_sections
+
+    print(f"revise_sections: completed revision of {len(tasks)} sections")
+
+    # Rebuild full report from sections
+    full_report = f"# {topic}\n\n"
+    all_sources = []
+
+    for section in revised_sections:
+        full_report += f"## {section['title']}\n\n{section['content']}\n\n"
+        all_sources.extend(section.get('sources', []))
+
+    # Add references section
+    unique_sources = list(dict.fromkeys(all_sources))
+    full_report += "## References\n\n"
+    for i, source in enumerate(unique_sources, 1):
+        full_report += f"[{i}] {source}\n"
+
+    # Save to MongoDB
+    report_id = state.get("report_id", "")
+    new_version_id = state.get("version_id", 0) + 1
+
+    try:
+        await save_report(report_id, new_version_id, full_report)
+        print(f"revise_sections: saved report {report_id} version {new_version_id} to MongoDB")
+    except Exception as e:
+        print(f"revise_sections: failed to save report to MongoDB: {e}")
+
+    return {
+        "report_sections": revised_sections,
+        "report_content": full_report,
+        "report_references": unique_sources,
+        "version_id": new_version_id,
+        "report_history": state.get("report_history", []) + [new_version_id]
+    }
+
+
+async def revise_single_section(
+    section: dict,
+    topic: str,
+    research_by_subtopic: dict,
+    min_credibility_score: float,
+    section_gaps: list
+) -> dict:
+    """
+    Revise a single section to address specific gaps.
+    Uses the original content as a base and improves it.
+    """
+    section_title = section.get("title", "")
+    original_content = section.get("original_content", "")
+    section_subtopics = section.get("subtopics", [])
+
+    print(f"    Revising: {section_title}")
+
+    # Gather relevant research
+    relevant_research = ""
+    sources_list = []
+
+    for subtopic in section_subtopics:
+        if subtopic in research_by_subtopic:
+            results = research_by_subtopic[subtopic]["results"]
+            credibilities = research_by_subtopic[subtopic]["credibilities"]
+
+            for source, findings in list(results.items())[:3]:
+                if credibilities.get(source, 0.5) >= min_credibility_score:
+                    relevant_research += f"\nSource: {source}\n{findings}\n"
+                    sources_list.append(source)
+
+    # Also include gap research
+    if "[Gap Research]" in research_by_subtopic:
+        gap_results = research_by_subtopic["[Gap Research]"]["results"]
+        for source, findings in list(gap_results.items())[:3]:
+            relevant_research += f"\nSource (gap research): {source}\n{findings}\n"
+            sources_list.append(source)
+
+    # Build gaps instruction
+    gaps_instruction = "\n**GAPS TO ADDRESS:**\n"
+    for gap in section_gaps:
+        gaps_instruction += f"- {gap.get('gap_description', '')}\n"
+
+    revision_prompt = f"""
+    You are revising the "{section_title}" section of a research report on: {topic}
+
+    ORIGINAL CONTENT:
+    {original_content}
+
+    {gaps_instruction}
+
+    SOURCES FOR REVISION:
+    {relevant_research[:2500]}
+
+    **STRICT GROUNDING RULES:**
+    1. ONLY add information that appears in the SOURCES above
+    2. Every new claim MUST cite a source
+    3. DO NOT invent names, titles, dates, statistics, or facts not in sources
+    4. DO NOT use placeholder names like "XYZ", "Company A", etc.
+    5. If sources don't provide enough info to fill a gap, acknowledge the limitation
+    6. It's better to leave a gap partially addressed than to fabricate information
+
+    INSTRUCTIONS:
+    - Keep accurate parts of original content
+    - Address gaps ONLY with information from the sources provided
+    - Add citations [1], [2] for all new claims
+    - If you cannot find source support for a gap, write: "Further research needed on [topic]"
+
+    Return ONLY the revised section content (no title/header).
+    """
+
+    messages = [
+        SystemMessage(content="You are a research report editor who improves sections by addressing specific gaps while preserving good content."),
+        HumanMessage(content=revision_prompt)
+    ]
+
+    response = await llm.ainvoke(messages)
+    revised_content = response.content if hasattr(response, 'content') else str(response)
+
+    return {
+        "title": section_title,
+        "content": revised_content,
+        "sources": sources_list,
+        "subtopics": section_subtopics
+    }
+
+
 def display_final_report(state: dict) -> dict:
     """
     Display the final report to the user after evaluation passes.
@@ -1081,7 +1441,7 @@ def display_final_report(state: dict) -> dict:
     report_content = state.get("report_content", "")
     final_score = state.get("final_score", 0)
 
-    print(f"display_final_report: displaying report (score: {final_score}/100)")
+    print(f"display_final_report: report_content: {report_content}")
 
     if not report_content:
         return {"messages": []}
@@ -1101,7 +1461,7 @@ def prompt_for_feedback(state: dict) -> dict:
 
     print(f"prompt_for_feedback: displaying prompt (round {len(user_feedback_list) + 1})")
 
-    feedback_prompt = f"""I've completed the report (score: {final_score}/100).
+    feedback_prompt = f"""I've completed the report.
 
 Would you like me to:
 - Expand on any specific areas?

@@ -42,6 +42,7 @@ def create_agent(use_checkpointer=False):
     # Report Writing Nodes
     workflow.add_node("generate_outline", generate_outline)
     workflow.add_node("write_sections", write_sections_with_citations)
+    workflow.add_node("revise_sections", revise_sections)  # Targeted section revision
 
     # User Feedback Nodes (after full report is generated)
     workflow.add_node("display_report", display_final_report)
@@ -118,15 +119,18 @@ def create_agent(use_checkpointer=False):
         }
     )
 
-    # Gap identification can lead to regenerating outline or proceeding to display report
+    # Gap identification leads to targeted revision (not full regeneration)
     workflow.add_conditional_edges(
         "identify_gaps",
         route_after_gap_identification,
         {
-            "regenerate": "generate_outline",
+            "regenerate": "revise_sections",  # Targeted revision instead of full regeneration
             "finalize": "display_report"
         }
     )
+
+    # After revising sections, re-evaluate the report
+    workflow.add_edge("revise_sections", "evaluate_report")
 
     # Display report first, then show feedback prompt, then collect feedback
     workflow.add_edge("display_report", "prompt_for_feedback")

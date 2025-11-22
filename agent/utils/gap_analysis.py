@@ -14,6 +14,7 @@ class ResearchGap(BaseModel):
     gap_type: str  # 'missing_topic', 'insufficient_depth', 'conflicting_info', 'outdated'
     priority: str  # 'high', 'medium', 'low'
     follow_up_query: str
+    affected_sections: list[str] = []  # Section titles that need revision for this gap
 
 
 async def identify_research_gaps(
@@ -118,12 +119,20 @@ async def identify_research_gaps(
 async def analyze_report_gaps(
     topic: str,
     report_content: str,
-    research_results: List[Dict]
+    research_results: List[Dict],
+    section_titles: List[str] = None
 ) -> List[ResearchGap]:
     """
-    Analyze a draft report to identify gaps in coverage, logic, or evidence
+    Analyze a draft report to identify gaps in coverage, logic, or evidence.
+    Also identifies which sections are affected by each gap for targeted revision.
     """
     print(f"analyze_report_gaps: analyzing report of length {len(report_content)}")
+
+    # Extract section titles from report if not provided
+    if not section_titles:
+        import re
+        section_titles = re.findall(r'^## (.+)$', report_content, re.MULTILINE)
+        print(f"analyze_report_gaps: extracted {len(section_titles)} section titles")
 
     # Build research summary
     research_summary = "Available research data:\n"
@@ -137,12 +146,17 @@ async def analyze_report_gaps(
 
         research_summary += f"- {subtopic}: {len(results)} sources\n"
 
+    sections_list = "\n".join(f"- {title}" for title in section_titles) if section_titles else "No sections found"
+
     gap_analysis_prompt = f"""
     You are a report quality analyst. Review this research report and identify gaps.
 
     Topic: {topic}
 
     {research_summary}
+
+    Report sections:
+    {sections_list}
 
     Report content:
     {report_content[:6000]}
@@ -157,16 +171,17 @@ async def analyze_report_gaps(
     - gap_description: Clear description of what's missing or problematic
     - gap_type: One of the four types above
     - priority: high, medium, or low
-    - follow_up_query: Specific search query to fill this gap (or "N/A - use existing research")
+    - follow_up_query: Specific search query to fill this gap (or "N/A" if existing research suffices)
+    - affected_sections: List of section titles that need revision to address this gap (use EXACT titles from the list above)
 
     Return 2-4 gaps maximum, focusing on the most critical issues.
     If the report seems comprehensive, return an empty list.
 
-    Return as JSON array of objects with keys: gap_description, gap_type, priority, follow_up_query
+    Return as JSON array of objects with keys: gap_description, gap_type, priority, follow_up_query, affected_sections
     """
 
     messages = [
-        SystemMessage(content="You are a report quality analyst that identifies gaps in research reports."),
+        SystemMessage(content="You are a report quality analyst that identifies gaps in research reports and maps them to specific sections."),
         HumanMessage(content=gap_analysis_prompt)
     ]
 
@@ -174,12 +189,12 @@ async def analyze_report_gaps(
         response = await llm.ainvoke(messages)
         response_text = response.content if hasattr(response, 'content') else str(response)
 
-        # Try to parse JSON (simplified - you might want better JSON parsing)
+        # Try to parse JSON
         import json
-        import re
+        import re as re_module
 
         # Extract JSON array if present
-        json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+        json_match = re_module.search(r'\[.*\]', response_text, re_module.DOTALL)
         if json_match:
             gaps_data = json.loads(json_match.group())
         else:
@@ -190,11 +205,17 @@ async def analyze_report_gaps(
         gaps = []
         for gap_dict in gaps_data:
             try:
+                affected = gap_dict.get('affected_sections', [])
+                # Ensure affected_sections is a list
+                if isinstance(affected, str):
+                    affected = [affected]
+
                 gap = ResearchGap(
                     gap_description=gap_dict.get('gap_description', ''),
                     gap_type=gap_dict.get('gap_type', 'missing_topic'),
                     priority=gap_dict.get('priority', 'medium'),
-                    follow_up_query=gap_dict.get('follow_up_query', '')
+                    follow_up_query=gap_dict.get('follow_up_query', ''),
+                    affected_sections=affected
                 )
                 gaps.append(gap)
             except Exception as e:
@@ -202,6 +223,8 @@ async def analyze_report_gaps(
                 continue
 
         print(f"analyze_report_gaps: found {len(gaps)} gaps")
+        for gap in gaps:
+            print(f"  - [{gap.priority}] {gap.gap_description[:50]}... -> sections: {gap.affected_sections}")
         return gaps
 
     except Exception as e:
