@@ -198,7 +198,7 @@
 }
 
 .message-content a {
-  color: var(--primary-color);
+  color: #2563eb; /* Blue color for links */
   text-decoration: underline;
 }
 
@@ -318,7 +318,7 @@
 
 .send-button {
   padding: 0;
-  background: var(--primary-color);
+  background: var(--accent-color);
   color: white;
   border: none;
   border-radius: 8px;
@@ -347,6 +347,29 @@
 .send-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.settings-container {
+  padding: 0.25rem 2rem;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.settings-button {
+  padding: 0.5rem 1rem;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.settings-button:hover {
+  background: var(--bg-secondary);
+  border-color: var(--text-tertiary);
 }
 
 /* Scrollbar styling */

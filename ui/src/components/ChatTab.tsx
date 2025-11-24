@@ -3,6 +3,7 @@ import { Client } from '@langchain/langgraph-sdk'
 import { Send, Loader2 } from "lucide-react"
 import ReactMarkdown from 'react-markdown'
 import { createThread as createThreadInDb, appendMessage } from '../services/db'
+import { SettingsModal, type AgentConfig } from './SettingsModal'
 import './ChatTab.css'
 
 interface Message {
@@ -19,10 +20,25 @@ const getClient = () => {
   const apiUrl = import.meta.env.VITE_API_URL
   console.log('API URL:', apiUrl)
   if (!client) {
-    client = new Client({ apiUrl: apiUrl })
+    client = new Client({
+      apiUrl: apiUrl
+    })
     console.log('Initialized LangGraph client with URL:', apiUrl)
   }
   return client
+}
+
+const defaultConfig: AgentConfig = {
+  search_api: 'tavily',
+  max_search_results: 5,
+  max_research_depth: 2,
+  num_subtopics: 4,
+  max_clarification_rounds: 3,
+  min_report_score: 85,
+  max_revision_rounds: 2,
+  enable_user_feedback: true,
+  enable_cross_verification: false,
+  min_credibility_score: 0.5
 }
 
 function ChatTab() {
@@ -30,10 +46,30 @@ function ChatTab() {
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [currentThreadId, setCurrentThreadId] = useState<string | undefined>(undefined)
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [agentConfig, setAgentConfig] = useState<AgentConfig>(defaultConfig)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const sendButtonRef = useRef<HTMLButtonElement>(null)
   const processedMessagesCountRef = useRef<number>(0) // Track how many backend messages we've processed
+
+  // Load configuration from localStorage on mount
+  useEffect(() => {
+    const savedConfig = localStorage.getItem('agentConfig')
+    if (savedConfig) {
+      try {
+        const parsed = JSON.parse(savedConfig)
+        setAgentConfig({ ...defaultConfig, ...parsed })
+      } catch (e) {
+        console.error('Failed to parse saved config:', e)
+      }
+    }
+  }, [])
+
+  const handleConfigSave = (config: AgentConfig) => {
+    setAgentConfig(config)
+    localStorage.setItem('agentConfig', JSON.stringify(config))
+  }
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -115,7 +151,7 @@ function ChatTab() {
 
       // Check if we need to resume from interrupt
       const state = await client.threads.getState(threadId)
-      const isInterrupted = state.next?.includes('collect_response') || state.next?.includes('collect_user_feedback')
+      const isInterrupted = state.next?.includes('collect_response') || state.next?.includes('collect_feedback')
 
       let streamIterator
       if (isInterrupted) {
@@ -126,8 +162,9 @@ function ChatTab() {
           'agent',
           {
             command: { resume: userInput },
-            streamMode: ['values', 'updates', 'messages']
-          }
+            streamMode: ['values', 'updates', 'messages'],
+            config: { configurable: agentConfig }
+          } as any
         )
       } else {
         // Start new run
@@ -163,8 +200,9 @@ function ChatTab() {
           'agent',
           {
             input,
-            streamMode: ['values', 'updates', 'messages']
-          }
+            streamMode: ['values', 'updates', 'messages'],
+            config: { configurable: agentConfig }
+          } as any
         )
       }
 
@@ -179,13 +217,14 @@ function ChatTab() {
             const backendMessages = state.messages
             const alreadyProcessed = processedMessagesCountRef.current
 
-            // Filter for AI messages only
+            // Filter for AI messages only (exclude human, user, and tool messages)
             const aiMessages = backendMessages
               .filter((msg: any) => {
                 if (typeof msg === 'string') return true
                 if (!msg || typeof msg !== 'object') return false
                 const msgType = msg.type || msg.role || ''
-                return msgType !== 'human' && msgType !== 'user'
+                // Exclude human/user messages AND tool messages (raw JSON responses)
+                return msgType !== 'human' && msgType !== 'user' && msgType !== 'tool'
               })
 
             // Only process new messages we haven't seen yet
@@ -296,6 +335,19 @@ function ChatTab() {
 
         <div ref={messagesEndRef} />
       </div>
+
+      <div className="settings-container">
+        <button className="settings-button" onClick={() => setIsSettingsOpen(true)}>
+          Settings
+        </button>
+      </div>
+
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        onSave={handleConfigSave}
+        currentConfig={agentConfig}
+      />
 
       <div className="chat-input-container">
         <textarea
