@@ -2,13 +2,39 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, Tool
 from langgraph.types import RunnableConfig, interrupt
 from langgraph.prebuilt import ToolNode
 from pydantic import create_model
-from utils.model import llm, evaluator_llm
+from utils.model import llm, llm_quality, evaluator_llm
 from utils.subresearcher import subresearcher_graph
 from utils.verification import verify_research_cross_references
 from utils.db import save_report
 from utils.configuration import get_config_from_configurable, tavily_client
 from utils.tools import report_tools
 import asyncio, json, re, uuid
+
+
+def format_source_as_markdown_link(source: str) -> str:
+    """
+    Format a source as a proper markdown link.
+    Handles:
+    - Raw URLs: "https://example.com" -> "[example.com](https://example.com)"
+    - Title (URL) format: "Title (https://example.com)" -> "[Title](https://example.com)"
+    - Already formatted or other: return as-is
+    """
+    # Check if it's "Title (URL)" format
+    title_url_match = re.match(r'^(.+?)\s*\((https?://[^\)]+)\)$', source)
+    if title_url_match:
+        title = title_url_match.group(1).strip()
+        url = title_url_match.group(2)
+        return f"[{title}]({url})"
+
+    # Check if it's a raw URL
+    if re.match(r'^https?://', source):
+        # Extract domain for display text
+        domain_match = re.match(r'https?://(?:www\.)?([^/]+)', source)
+        display = domain_match.group(1) if domain_match else source
+        return f"[{display}]({source})"
+
+    # Return as-is if already formatted or unknown format
+    return source
 
 
 # Create ToolNode for report tools
@@ -358,13 +384,12 @@ def generate_clarification_question(state: dict, config: RunnableConfig) -> dict
     ONLY ask for:
     - User-specific preferences (e.g., "Which specific items/entities do you want to compare?")
     - Missing constraints that are user choices (e.g., "What time period?" if not mentioned)
-    - User goals or use cases (e.g., "What will you use this research for?")
     - Ambiguities that require user input (e.g., "Do you mean X or Y?" when both are possible)
     
     If the topic has a clear subject and at least one constraint (time, category, scope, etc.), respond with "ENOUGH_CONTEXT"
     
     Examples:
-    - Topic "most popular kpop song of 2025" + user said "chart success and social impact" → ENOUGH_CONTEXT (agent can research what metrics are used)
+    - Topic "most popular X of 2025" + user said "criteria A and criteria B" → ENOUGH_CONTEXT (agent can research what metrics are used)
     - Topic "MMORPG games in 2026" → ENOUGH_CONTEXT (has subject + time)
     - Topic "games" → Ask "What type of games or time period?" (missing constraint)
     - Topic "best practices" → Ask "Which domain or field?" (missing subject scope)
@@ -468,12 +493,12 @@ Definition of sufficiency (BE LENIENT):
 - Standard metrics, criteria, definitions, and methodologies can be researched - don't require them upfront
 
 IMPORTANT - Be generous in marking as sufficient:
-- If the topic mentions criteria like "chart success and social impact", that's ENOUGH - you can research what metrics are used for these
+- If the topic mentions criteria like "success metrics" or "evaluation criteria", that's ENOUGH - you can research what specific metrics are used
 - If the topic has subject + constraint, it's sufficient even if some technical details are missing
 - Only mark as insufficient if the topic is truly vague or missing fundamental constraints
 
 Examples:
-- "most popular kpop song of 2025" + "chart success and social impact" → SUFFICIENT (can research metrics)
+- "most popular X of 2025" + "criteria A and criteria B" → SUFFICIENT (can research metrics)
 - "MMORPG games in 2026" → SUFFICIENT (has subject + time)
 - "games" → INSUFFICIENT (too vague, no constraint)
 
@@ -525,7 +550,7 @@ async def generate_subtopics(state: dict, config: RunnableConfig) -> dict:
         subtopics=(list[str], ...)
     )
 
-    structured_llm = llm.with_structured_output(SubtopicsOutput)
+    structured_llm = llm_quality.with_structured_output(SubtopicsOutput)
 
     prompt = f"""
     You are a research strategist that generates optimal subtopics for comprehensive research.
@@ -533,11 +558,26 @@ async def generate_subtopics(state: dict, config: RunnableConfig) -> dict:
 
     Topic: {topic}
 
-    FIRST, analyze the topic type and choose the best research approach:
+    CRITICAL REQUIREMENT: Every subtopic MUST directly answer or contribute to answering the main question/topic. 
+    Do NOT include tangential topics, background information, or general context that doesn't directly address the core question.
 
-    **APPROACH A - Entity-Focused** (use when topic is about multiple items/entities):
-    Best for: "Games releasing in 2026", "Top tech companies", "Countries affected by X"
-    Strategy: Research specific entities individually, then compare
+    FIRST, identify the core question being asked:
+    - If topic asks "most popular X" or "best X" → Focus on ranking, metrics, comparisons, specific candidates
+    - If topic asks "what is X" or "how does X work" → Focus on explanation, components, mechanisms
+    - If topic asks "effects of X" or "impact of X" → Focus on specific effects, outcomes, consequences
+    - If topic asks "X in [time period]" → Focus on what happened/occurred in that specific period
+
+    THEN, analyze the topic type and choose the best research approach:
+
+    **APPROACH A - Entity-Focused** (use when topic is about identifying/comparing specific items):
+    Best for: "Most popular X", "Top X", "Games releasing in 2026", "Best X"
+    Strategy: Research specific entities/candidates individually, then compare and rank
+    Example for "Most popular X of 2024":
+    - "Top X items on relevant charts/rankings in 2024 - performance metrics"
+    - "X items with highest engagement metrics (views, sales, downloads) in 2024"
+    - "X items with most social media engagement and viral moments in 2024"
+    - "Comparison of top X items across different metrics in 2024"
+    
     Example for "MMORPGs releasing in 2026":
     - "Ashes of Creation 2026 release - features, development status, community reception"
     - "Throne and Liberty 2026 - gameplay systems, publisher, launch expectations"
@@ -546,7 +586,7 @@ async def generate_subtopics(state: dict, config: RunnableConfig) -> dict:
 
     **APPROACH B - Thematic/Analytical** (use when topic needs conceptual analysis):
     Best for: "Effects of climate change", "Best practices for X", "How does Y work"
-    Strategy: Break down by themes, causes, effects, or analytical angles
+    Strategy: Break down by themes, causes, effects, or analytical angles - ALL must directly answer the question
     Example for "Impact of AI on healthcare":
     - "AI diagnostic tools and accuracy improvements in medical imaging"
     - "AI-powered drug discovery and development timelines"
@@ -560,24 +600,73 @@ async def generate_subtopics(state: dict, config: RunnableConfig) -> dict:
     - "Charging infrastructure developments across major markets"
     - "Price trends and affordability of EVs in 2025"
 
-    RULES:
-    1. Choose the approach that will yield the MOST USEFUL and SEARCHABLE subtopics
-    2. Each subtopic MUST preserve core constraints (time periods, specific subjects, scope)
+    STRICT RULES:
+    1. Each subtopic MUST directly answer the main question - no tangential topics
+    2. For "most popular/best X" questions: Focus on ranking, metrics, comparisons, NOT general background
     3. Subtopics should be specific enough to return good search results
-    4. Avoid generic/vague subtopics like "Overview" or "General trends"
-    5. For entity-focused topics, try to identify SPECIFIC entities (names, titles, companies) when possible
-    6. Ensure subtopics are distinct and don't overlap significantly
+    4. Avoid generic/vague subtopics like "Overview", "General trends", or "Background"
+    5. Do NOT include subtopics about "cultural impact", "fan engagement", "visual trends" unless they directly answer the main question
+    6. For entity-focused topics, try to identify SPECIFIC entities (names, titles, companies) when possible
+    7. Ensure subtopics are distinct and don't overlap significantly
 
-    Generate {agent_config.num_subtopics} subtopics that will produce the most comprehensive and useful research.
+    Generate {agent_config.num_subtopics} subtopics that will produce the most comprehensive and useful research DIRECTLY answering the topic.
     """
 
     llm_response = await structured_llm.ainvoke([
-        SystemMessage(content=f"You are a research strategist that analyzes topics and generates exactly {agent_config.num_subtopics} optimal subtopics. You choose between entity-focused, thematic, or hybrid approaches based on what will yield the best research results."),
+        SystemMessage(content=f"You are a research strategist that generates exactly {agent_config.num_subtopics} optimal subtopics. CRITICAL: Every subtopic must directly answer the main question - do NOT include tangential topics, background information, or general context. For 'most popular/best/top X' questions, focus on ranking, metrics, and comparisons, NOT tangential topics unless they directly determine the answer."),
         HumanMessage(content=prompt)
     ])
 
     subtopics = llm_response.subtopics
     print(f"generate_subtopics: generated {len(subtopics)} subtopics")
+    
+    # Validate subtopics are relevant to the main topic
+    if subtopics:
+        RelevanceCheckOutput = create_model(
+            'RelevanceCheckOutput',
+            relevant_subtopics=(list[str], ...),
+            reasoning=(str, ...)
+        )
+        
+        relevance_llm = llm.with_structured_output(RelevanceCheckOutput)
+        
+        relevance_prompt = f"""
+        Review the following subtopics for the main topic: "{topic}"
+        
+        Subtopics:
+        {chr(10).join(f"{i+1}. {st}" for i, st in enumerate(subtopics))}
+        
+        The main topic asks: "{topic}"
+        
+        Filter out subtopics that are:
+        - Tangential background (e.g., "Cultural Impact", "General Trends", "Background History" for "most popular X")
+        - General context that doesn't identify/rank/compare specific items
+        - Topics that are related but don't directly contribute to answering the core question
+        
+        Keep subtopics that:
+        - Directly identify, rank, or compare specific items/entities
+        - Focus on metrics, data, or evidence that answers the question
+        - Help determine "most popular", "best", "top", etc. through specific criteria
+        
+        Return the filtered list of relevant subtopics (keep all if they're all relevant).
+        """
+        
+        try:
+            relevance_check = await relevance_llm.ainvoke([
+                SystemMessage(content="You filter subtopics to ensure they directly answer the main question. Remove any that are tangential or provide only background context."),
+                HumanMessage(content=relevance_prompt)
+            ])
+            
+            if relevance_check.relevant_subtopics and len(relevance_check.relevant_subtopics) > 0:
+                original_count = len(subtopics)
+                subtopics = relevance_check.relevant_subtopics
+                print(f"generate_subtopics: filtered from {original_count} to {len(subtopics)} relevant subtopics")
+                if original_count != len(subtopics):
+                    print(f"generate_subtopics: filtering reasoning: {relevance_check.reasoning}")
+            else:
+                print("generate_subtopics: relevance check returned empty, using original subtopics")
+        except Exception as e:
+            print(f"generate_subtopics: relevance check failed: {e}, using original subtopics")
 
     # Generate subresearchers for each subtopic in parallel
     async def process_subtopic(idx: int, subtopic: str, main_topic: str):
@@ -586,10 +675,15 @@ async def generate_subtopics(state: dict, config: RunnableConfig) -> dict:
             "subtopic_id": idx,
             "subtopic": subtopic,
             "main_topic": main_topic,  # Pass main topic for search context
+            "other_subtopics": subtopics,
             "research_results": {},
             "research_depth": 1,  # Start at layer 1
             "source_credibilities": {},
-            "follow_up_queries": []
+            "follow_up_queries": [],
+            # Pass config values to subresearcher
+            "max_search_results": agent_config.max_search_results,
+            "max_research_depth": agent_config.max_research_depth,
+            "search_api": agent_config.search_api
         }
 
         result = await subresearcher_graph.ainvoke(subgraph_state)
@@ -616,8 +710,7 @@ async def generate_subtopics(state: dict, config: RunnableConfig) -> dict:
 
     subtopic_alert_message = f"""I've come up with {len(subtopics)} research areas on this topic:
 
-    {subtopic_list}
-    """
+{subtopic_list}"""
 
     return {
         "messages": [AIMessage(content=subtopic_alert_message)],
@@ -699,23 +792,36 @@ async def generate_outline(state: dict) -> dict:
         gaps_section += "\nYour outline MUST include sections that specifically address these gaps.\n"
 
     outline_prompt = f"""
-    You are a report outline specialist. Create a structured outline for a comprehensive research report.
+    You are a report outline specialist. Create a structured outline that DIRECTLY ANSWERS the main research question.
+
+    MAIN RESEARCH QUESTION: {topic}
 
     {research_overview}
     {gaps_section}
 
-    Create an outline with:
-    1. Executive Summary
-    2. Introduction (context and scope)
-    3. Main sections (3-5 sections covering the subtopics)
-    4. Analysis and Key Findings
-    5. Conclusion and Recommendations
+    CRITICAL: Organize sections by THEMES and ANSWERS, not by subtopics.
+    - If the same entity (person, song, product, etc.) appears in multiple subtopics' research, it should be discussed TOGETHER, not separately
+    - Synthesize findings across ALL subtopics to identify the KEY ANSWERS to the main question
+    - Each section should pull relevant information from ANY subtopic that has relevant data
 
-    For each main section, specify:
-    - Section title
-    - Which subtopics it covers
-    - Key questions to address
-    {"- How it addresses the identified gaps (if applicable)" if gaps_section else ""}
+    Example: If researching "most popular K-pop songs 2025":
+    - BAD: Section per subtopic (Charts section, Streaming section, Social Media section)
+    - GOOD: Section per answer (Top Songs section listing actual songs with combined evidence from charts + streaming + social)
+
+    Required structure:
+    1. Executive Summary - Directly answer the main question with specific names/titles/rankings
+    2. Main sections (2-4 sections) organized by THEMES that answer the question:
+       - Each section should synthesize findings from ALL relevant subtopics
+       - Focus on WHAT the answer is, not WHERE the data came from
+       - Include specific names, titles, rankings prominently
+    3. Supporting Analysis - Context, methodology, factors behind the findings
+    4. Conclusion - Concise final answer to the main research question
+
+    For each section, specify:
+    - Section title (focused on answering the main question)
+    - Key questions to address (what specific answers should this section provide?)
+    - Which subtopics have relevant data (for reference, but section should synthesize across all)
+    {"- How it addresses the identified gaps" if gaps_section else ""}
 
     Return as a JSON object with this structure:
     {{
@@ -723,14 +829,14 @@ async def generate_outline(state: dict) -> dict:
         {{
           "title": "Section Title",
           "subtopics": ["subtopic1", "subtopic2"],
-          "key_questions": ["question1", "question2"]
+          "key_questions": ["question1", "question2", "question3"]
         }}
       ]
     }}
     """
 
     messages = [
-        SystemMessage(content="You are a report outline specialist that creates structured outlines for research reports."),
+        SystemMessage(content="You are an expert report outline specialist. Create comprehensive, well-structured outlines that ensure complete coverage, logical flow, and clear organization. Focus on creating outlines that will result in high-quality reports with excellent coverage, evidence, structure, and clarity."),
         HumanMessage(content=outline_prompt)
     ]
 
@@ -796,16 +902,20 @@ async def write_single_section(
     topic: str,
     research_by_subtopic: dict,
     min_credibility_score: float,
-    gaps: list = None
+    gaps: list = None,
+    all_sections: list = None,
+    section_index: int = 0
 ) -> dict:
     """
     Write a single section of the report with citations.
     This function is called in parallel for each section.
     If insufficient sources exist, performs additional web search.
     Uses gaps information to improve section quality on revisions.
+    Includes outline context to avoid overlap with other sections.
     """
     section_title = section.get("title", "")
     section_subtopics = section.get("subtopics", [])
+    all_sections = all_sections or []
     MIN_SOURCES_THRESHOLD = 2  # Minimum sources needed before searching for more
     gaps = gaps or []
 
@@ -819,11 +929,11 @@ async def write_single_section(
             results = research_by_subtopic[subtopic]["results"]
             credibilities = research_by_subtopic[subtopic]["credibilities"]
 
-            # Filter sources by credibility and take top 3
+            # Filter sources by credibility and take top 5 for better coverage
             credible_sources = [(source, findings) for source, findings in results.items()
                               if credibilities.get(source, 0.5) >= min_credibility_score]
 
-            for source, findings in credible_sources[:3]:  # Top 3 credible sources per subtopic
+            for source, findings in credible_sources[:5]:  # Top 5 credible sources per subtopic for better evidence
                 credibility = credibilities.get(source, 0.5)
                 relevant_research += f"\nSource: {source} (credibility: {credibility:.2f})\n{findings}\n"
                 sources_list.append(source)
@@ -860,43 +970,148 @@ async def write_single_section(
                 gaps_instruction += f"- {gap_desc}\n"
             gaps_instruction += "\nMake sure your section addresses these gaps with specific details and evidence.\n"
 
+    # Build outline context to avoid overlap between sections
+    outline_context = ""
+    if all_sections and len(all_sections) > 1:
+        sections_before = all_sections[:section_index]
+        sections_after = all_sections[section_index + 1:]
+
+        outline_context = "\n**REPORT STRUCTURE - Your section's role:**\n"
+        outline_context += f"You are writing Section {section_index + 1} of {len(all_sections)}.\n\n"
+
+        if sections_before:
+            outline_context += "SECTIONS BEFORE YOURS (readers will have already seen this info - DO NOT repeat):\n"
+            for i, s in enumerate(sections_before):
+                s_title = s.get("title", "")
+                s_questions = s.get("key_questions", [])
+                outline_context += f"  {i + 1}. \"{s_title}\""
+                if s_questions:
+                    outline_context += f" - covers: {', '.join(s_questions[:2])}"
+                outline_context += "\n"
+            outline_context += "\n"
+
+        if sections_after:
+            outline_context += "SECTIONS AFTER YOURS (DO NOT cover their content - they will handle it):\n"
+            for i, s in enumerate(sections_after):
+                s_title = s.get("title", "")
+                s_questions = s.get("key_questions", [])
+                outline_context += f"  {section_index + 2 + i}. \"{s_title}\""
+                if s_questions:
+                    outline_context += f" - will cover: {', '.join(s_questions[:2])}"
+                outline_context += "\n"
+            outline_context += "\n"
+
+        outline_context += """**AVOID REDUNDANCY:**
+- Do NOT re-introduce entities/games/items that previous sections already introduced
+- If you mention an entity, focus on THIS section's unique angle (not general overview)
+- Reference prior sections if needed: "As noted above..." or "Building on the overview..."
+- Save details for later sections if they fit better there
+"""
+
     section_prompt = f"""
     Write the "{section_title}" section of a research report on: {topic}
-
+    {outline_context}
     SOURCES (numbered for citation):
-    {relevant_research[:3000]}
+    {relevant_research[:5000]}
     {gaps_instruction}
 
-    **STRICT GROUNDING RULES - FOLLOW EXACTLY:**
-    1. ONLY write about information that appears in the SOURCES above
-    2. Every factual claim MUST have a citation [1], [2], etc. pointing to a source above
-    3. DO NOT invent, infer, or assume any names, titles, dates, statistics, or facts
-    4. DO NOT use placeholder names like "XYZ", "Company A", "the product", etc.
-    5. If the sources don't mention something specific, DO NOT mention it
-    6. If you're unsure whether something is in the sources, leave it out
-    7. It's better to write less content that is accurate than more content that is fabricated
+    **CRITICAL ANTI-HALLUCINATION RULES - VIOLATIONS ARE UNACCEPTABLE:**
+    1. ONLY write about information that EXPLICITLY appears in the SOURCES above - word for word verification
+    2. Every factual claim (names, dates, numbers, titles, events, statistics) MUST have a citation [1], [2], etc.
+    3. DO NOT combine information from different sources to create new facts
+    4. DO NOT infer or assume connections between facts that aren't stated in sources
+    5. DO NOT use your knowledge to add information not in the sources
+    6. DO NOT mention specific entities, dates, rankings, or statistics unless they appear EXACTLY in the sources
+    7. If a source mentions "Entity X" but doesn't mention it ranked #1, DO NOT say it was #1
+    8. If sources mention different entities separately, DO NOT combine them into a single narrative unless sources explicitly do so
+    9. If you're unsure whether something is in the sources, LEAVE IT OUT
+    10. It's better to write less content that is accurate than more content that is fabricated
+
+    **VERIFICATION PROCESS:**
+    - Before writing each sentence, check: "Is this EXACTLY stated in the sources?"
+    - For specific claims (entity names, dates, rankings, statistics): Quote or closely paraphrase the source
+    - If you can't find a source for a claim, DO NOT include it
 
     **WHAT TO DO IF SOURCES ARE LIMITED:**
-    - Focus only on what IS mentioned in the sources
-    - Use phrases like "According to [source]..." or "Research indicates..."
+    - Focus only on what IS explicitly mentioned in the sources
+    - Use phrases like "According to [source]..." or "Source [X] states..."
     - Acknowledge gaps: "Available research focuses on X, while Y remains less documented"
-    - DO NOT fill gaps with invented information
+    - DO NOT fill gaps with invented information, even if you think you know the answer
 
-    Write a well-structured section with:
-    - Clear topic sentences grounded in source material
-    - Every claim backed by a citation
-    - 2-4 paragraphs depending on available source content
+    Write a high-quality, well-structured section that excels in:
+    
+    **COVERAGE:**
+    - Comprehensively address all aspects of the section topic
+    - Cover key questions and subtopics assigned to this section
+    - Include relevant details, examples, and context from sources
+    - Don't leave important aspects unaddressed
 
+    **INCLUDE SPECIFIC DETAILS FROM SOURCES:**
+    - List all specific NAMES mentioned (people, artists, companies, products)
+    - List all specific TITLES mentioned (songs, albums, movies, games, etc.)
+    - Include RANKINGS with positions (if source says "top 5", list all 5 items)
+    - Include NUMBERS and STATISTICS (sales, views, chart positions, dates)
+    - DO NOT summarize lists as "various X" or "several Y" - name them specifically
+    - If sources rank items, include ALL ranked items with their exact positions
+
+    **EVIDENCE:**
+    - Every factual claim must have a citation [1], [2], etc.
+    - Use multiple sources to support important claims when available
+    - Integrate citations naturally into the text
+    - Provide specific examples and data from sources
+    
+    **STRUCTURE:**
+    - Start with a clear topic sentence that introduces the section's focus
+    - Organize content logically (chronological, thematic, or by importance)
+    - Use smooth transitions between paragraphs
+    - Build arguments progressively, leading to key insights
+    - End paragraphs with sentences that connect to the next idea
+    
+    **CLARITY:**
+    - Write in clear, professional academic style
+    - Use precise language and avoid vague statements
+    - Explain technical terms when first introduced
+    - Write concise, well-crafted sentences
+    - Ensure each paragraph has a single clear focus
+    - Use active voice when appropriate for readability
+    
+    **LENGTH:**
+    - Write 3-5 substantial paragraphs (aim for 200-400 words)
+    - Provide sufficient detail to comprehensively cover the topic
+    - Balance depth with readability
+    
     IMPORTANT: Do NOT include the section title. Start directly with the content.
     """
 
+    # Special handling for Executive Summary and Conclusion sections
+    is_executive_summary = "executive summary" in section_title.lower()
+    is_conclusion = "conclusion" in section_title.lower() or "recommendations" in section_title.lower()
+    
+    if is_executive_summary:
+        section_prompt += "\n\n**EXECUTIVE SUMMARY REQUIREMENTS:**\n- Provide a concise, high-level overview of the entire report\n- Highlight the most important findings and conclusions\n- Summarize key insights from all sections\n- Keep it brief but comprehensive (2-3 paragraphs)\n- Write for a busy executive audience - clear and impactful"
+    elif is_conclusion:
+        section_prompt += "\n\n**CONCLUSION REQUIREMENTS:**\n- Synthesize findings from all sections\n- Draw clear, evidence-based conclusions\n- Provide actionable recommendations when applicable\n- Connect back to the research objectives\n- End with forward-looking statements or implications"
+    
     messages = [
-        SystemMessage(content="You are a research report writer that creates well-structured, evidence-based sections with proper citations."),
+        SystemMessage(content="You are an expert research report writer. CRITICAL: You MUST only write information that explicitly appears in the provided sources. DO NOT use your knowledge to add facts, names, dates, or statistics. Every factual claim must be directly traceable to a source. Hallucination is unacceptable. Additionally, focus on writing high-quality, well-structured content that excels in coverage, evidence, structure, and clarity."),
         HumanMessage(content=section_prompt)
     ]
 
-    response = await llm.ainvoke(messages)
+    response = await llm_quality.ainvoke(messages)
     section_content = response.content if hasattr(response, 'content') else str(response)
+    
+    # Verify grounding to catch hallucinations
+    if relevant_research and section_content:
+        try:
+            verification_result = await verify_section_grounding(section_content, relevant_research, section_title)
+            if verification_result.get("grounding_score", 1.0) < 0.7:
+                ungrounded = verification_result.get("ungrounded_claims", [])
+                if ungrounded:
+                    print(f"  WARNING: Potential hallucinations detected in '{section_title}': {ungrounded[:3]}")
+                    # Note: We still return the content, but log the warning
+                    # In production, you might want to regenerate or flag for review
+        except Exception as e:
+            print(f"  Warning: Grounding verification failed for '{section_title}': {e}")
 
     return {
         "title": section_title,
@@ -930,21 +1145,29 @@ async def verify_section_grounding(section_content: str, sources_text: str, sect
     SOURCES:
     {sources_text[:2000]}
 
-    Check for:
-    1. Claims that have no support in the sources
-    2. Names, titles, dates, or statistics not mentioned in sources
-    3. Placeholder names like "XYZ", "Company A", "Song A", "the product", etc.
+    CRITICAL: Check for hallucinations - claims that are NOT explicitly stated in the sources:
+    1. Specific names, entities, dates, or statistics mentioned in CONTENT but NOT in SOURCES
+    2. Claims that combine information from different sources to create new facts
+    3. Inferences or assumptions that go beyond what sources explicitly state
+    4. Specific rankings, positions, or achievements (e.g., "#1", "first", "most popular", "top") not stated in sources
+    5. Placeholder names like "XYZ", "Company A", "Entity A", "the product", etc.
+
+    EXAMPLES OF HALLUCINATIONS TO CATCH:
+    - If sources mention "Entity A" but CONTENT says "Entity A was #1" and sources don't say it was #1 → HALLUCINATION
+    - If sources mention "Entity B" and "Entity C" separately, but CONTENT says "Entity B and Entity C both achieved X" and sources don't state this together → HALLUCINATION
+    - If CONTENT mentions a specific entity name, date, ranking, or statistic that doesn't appear in SOURCES → HALLUCINATION
+    - If sources mention a general category but CONTENT names a specific item in that category not mentioned in sources → HALLUCINATION
 
     Return:
     - grounding_score: 0.0 (completely ungrounded) to 1.0 (fully grounded)
-    - ungrounded_claims: List of specific claims that appear fabricated
+    - ungrounded_claims: List of specific claims/sentences that appear fabricated or not in sources
     - has_placeholder_names: True if placeholder names detected
     - placeholder_examples: Examples of placeholder names found
     """
 
     try:
         response = await structured_llm.ainvoke([
-            SystemMessage(content="You verify if content is grounded in sources. Flag any fabricated information."),
+            SystemMessage(content="You are a strict fact-checker. You identify ANY claim in the content that is not explicitly stated in the sources. Be thorough - flag any names, dates, statistics, rankings, or facts that don't appear in the sources, even if they seem plausible."),
             HumanMessage(content=verification_prompt)
         ])
 
@@ -1007,11 +1230,14 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
         }
         print(f"write_sections_with_citations: added {len(gap_research)} gap research sources")
 
-    # Write all sections in parallel, passing gaps for context
-    print(f"write_sections_with_citations: writing {len(sections)} sections in parallel")
+    # Write all sections in parallel, passing gaps and outline context to avoid redundancy
+    print(f"write_sections_with_citations: writing {len(sections)} sections in parallel with outline context")
     tasks = [
-        write_single_section(section, topic, research_by_subtopic, agent_config.min_credibility_score, research_gaps)
-        for section in sections
+        write_single_section(
+            section, topic, research_by_subtopic, agent_config.min_credibility_score,
+            research_gaps, all_sections=sections, section_index=idx
+        )
+        for idx, section in enumerate(sections)
     ]
     written_sections = await asyncio.gather(*tasks)
 
@@ -1025,11 +1251,12 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
         full_report += f"## {section['title']}\n\n{section['content']}\n\n"
         all_sources.extend(section['sources'])
 
-    # Add references section
+    # Add references section with properly formatted markdown links
     unique_sources = list(dict.fromkeys(all_sources))  # Remove duplicates, preserve order
     full_report += "## References\n\n"
     for i, source in enumerate(unique_sources, 1):
-        full_report += f"[{i}] {source}\n"
+        formatted_source = format_source_as_markdown_link(source)
+        full_report += f"[{i}] {formatted_source}\n"
 
     # Generate report_id if not exists
     report_id = state.get("report_id", "")
@@ -1101,6 +1328,14 @@ async def evaluate_report(state: dict) -> dict:
     # Extract total score
     total_match = re.search(r'TOTAL:\s*(\d+)', response_text)
     score = int(total_match.group(1)) if total_match else 75
+
+    # Extract feedback text (everything after "FEEDBACK:" to end of text)
+    feedback_match = re.search(r'FEEDBACK:\s*(.+)', response_text, re.DOTALL)
+    feedback_text = feedback_match.group(1).strip() if feedback_match else "N/A"
+
+    # Log feedback (truncate if too long)
+    feedback_preview = feedback_text[:200] + "..." if len(feedback_text) > 200 else feedback_text
+    print(f"evaluate_report: feedback={feedback_preview}")
 
     scores = state.get("scores", {})
     scores[current_report_id] = score
@@ -1321,11 +1556,12 @@ async def revise_sections(state: dict, config: RunnableConfig) -> dict:
         full_report += f"## {section['title']}\n\n{section['content']}\n\n"
         all_sources.extend(section.get('sources', []))
 
-    # Add references section
+    # Add references section with properly formatted markdown links
     unique_sources = list(dict.fromkeys(all_sources))
     full_report += "## References\n\n"
     for i, source in enumerate(unique_sources, 1):
-        full_report += f"[{i}] {source}\n"
+        formatted_source = format_source_as_markdown_link(source)
+        full_report += f"[{i}] {formatted_source}\n"
 
     # Save to MongoDB
     report_id = state.get("report_id", "")
@@ -1422,7 +1658,7 @@ async def revise_single_section(
         HumanMessage(content=revision_prompt)
     ]
 
-    response = await llm.ainvoke(messages)
+    response = await llm_quality.ainvoke(messages)
     revised_content = response.content if hasattr(response, 'content') else str(response)
 
     return {
@@ -1707,5 +1943,21 @@ def route_after_gap_identification(state: dict) -> str:
     # Otherwise, finalize
     print("route_after_gap_identification: no significant gaps, finalizing")
     return "finalize"
+
+
+def route_after_display_report(state: dict, config: RunnableConfig) -> str:
+    """
+    Conditional edge: Route after displaying the final report
+    - If user feedback is enabled: Go to prompt_for_feedback
+    - If user feedback is disabled: Skip to END
+    """
+    agent_config = get_config_from_configurable(config.get("configurable", {}))
+
+    if agent_config.enable_user_feedback:
+        print("route_after_display_report: user feedback enabled, routing to 'prompt_for_feedback'")
+        return "prompt_for_feedback"
+    else:
+        print("route_after_display_report: user feedback disabled, routing to 'finalize'")
+        return "finalize"
 
 

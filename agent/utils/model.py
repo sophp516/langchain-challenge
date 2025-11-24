@@ -9,9 +9,16 @@ gemini_api_key = os.getenv("GEMINI_API_KEY")
 if not openai_api_key:
     raise ValueError("OPENAI_API_KEY environment variable is not set")
 
-# Main LLM for research and writing (GPT)
+# Fast LLM for simple tasks (intent classification, validation, etc.)
 llm = ChatOpenAI(
     model="gpt-4o-mini",
+    api_key=openai_api_key,
+)
+
+# Quality LLM for complex tasks (writing, extraction, planning)
+# Better at following complex instructions and avoiding hallucination
+llm_quality = ChatOpenAI(
+    model="gpt-4o",
     api_key=openai_api_key,
 )
 

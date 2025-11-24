@@ -89,8 +89,15 @@ def create_agent(use_checkpointer=False):
         }
     )
 
-    # Clarification loop
-    workflow.add_edge("generate_clarification", "collect_response")
+    # Clarification loop - conditional: if ENOUGH_CONTEXT, skip to research
+    workflow.add_conditional_edges(
+        "generate_clarification",
+        route_after_initial_check,  # checks is_finalized
+        {
+            "continue": "generate_subtopics",  # LLM said ENOUGH_CONTEXT
+            "ask_clarification": "collect_response"  # Need user input
+        }
+    )
     workflow.add_edge("collect_response", "validate_context")
     workflow.add_conditional_edges(
         "validate_context",
@@ -132,8 +139,15 @@ def create_agent(use_checkpointer=False):
     # After revising sections, re-evaluate the report
     workflow.add_edge("revise_sections", "evaluate_report")
 
-    # Display report first, then show feedback prompt, then collect feedback
-    workflow.add_edge("display_report", "prompt_for_feedback")
+    # Display report first, then conditionally prompt for feedback (or skip to END)
+    workflow.add_conditional_edges(
+        "display_report",
+        route_after_display_report,
+        {
+            "prompt_for_feedback": "prompt_for_feedback",
+            "finalize": END
+        }
+    )
     workflow.add_edge("prompt_for_feedback", "collect_feedback")
 
     # User Feedback Loop (after LLM evaluation passes)

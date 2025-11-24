@@ -1,8 +1,8 @@
 from typing import TypedDict
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
-from utils.model import llm
-from utils.configuration import tavily_client # Initialize tavily client separately for faster execution
+from utils.model import llm, llm_quality
+from utils.configuration import tavily_client, serper_client
 from utils.verification import filter_quality_sources
 import asyncio
 from functools import partial
@@ -13,47 +13,63 @@ class SubResearcherGraphState(TypedDict):
     subtopic_id: int
     subtopic: str
     main_topic: str  # The parent topic for context in searches
+    other_subtopics: list[str]  # Other subtopics being researched (for scope context)
     research_results: dict[str, str]
     research_depth: int  # Current depth layer (1, 2, or 3)
     source_credibilities: dict[str, float]  # Track credibility scores
     follow_up_queries: list[str]  # Queries for deeper research
+    # Config values from AgentConfig
+    max_search_results: int  # From frontend config
+    max_research_depth: int  # From frontend config
+    search_api: str  # From frontend config (tavily/serper)
 
 
 async def process_source(
     result: dict,
     subtopic: str,
+    main_topic: str,
     credibility_score: float
 ) -> tuple[str, str, float]:
     """
     Process a single source and return (source_key, findings, credibility) tuple
-    Enhanced with credibility tracking
+    Enhanced with credibility tracking and main topic context
     """
     source_url = result.get("url", "")
     source_title = result.get("title", "Untitled Source")
     source_content = result.get("content", "")
 
     summary_prompt = f"""
-    Based on the following content from a web source, extract and summarize the key findings
-    relevant to the subtopic: {subtopic}
+    Extract specific, concrete information from this source relevant to the research.
+
+    Main Research Topic: {main_topic}
+    Current Subtopic: {subtopic}
 
     Source Title: {source_title}
     Source URL: {source_url}
-    Source Credibility: {credibility_score:.2f}/1.0
 
     Content:
     {source_content}
 
-    Provide a concise summary of the key findings and insights from this source that are
-    relevant to the subtopic. Focus on factual information, data, and insights.
-    Include specific facts, statistics, or quotes when available.
+    PRIORITY EXTRACTION (include ALL that appear in the source):
+    - Specific NAMES (people, groups, artists, companies, products)
+    - Specific TITLES (songs, albums, movies, books, articles)
+    - RANKINGS and LISTS (top 10, #1, most popular, best-selling)
+    - NUMBERS and STATISTICS (sales figures, chart positions, dates, percentages)
+    - Direct QUOTES with attribution
+
+    Format your response as a list of specific facts found in this source.
+    Do NOT generalize or summarize - extract the actual names, titles, and numbers.
+    If the source lists "top songs" or "most popular X", list EVERY item mentioned.
+
+    Only include information relevant to "{main_topic}".
     """
 
     messages = [
-        SystemMessage(content="You are a research assistant that extracts and summarizes key findings from sources. Provide clear, factual summaries with specific details."),
+        SystemMessage(content="You are a precise research assistant that extracts specific names, titles, rankings, and numbers from sources. Never generalize - always include the exact names and figures mentioned. If a source ranks items or lists 'top X', extract every item in that list."),
         HumanMessage(content=summary_prompt)
     ]
 
-    summary_response = await llm.ainvoke(messages)
+    summary_response = await llm_quality.ainvoke(messages)
     findings = summary_response.content if hasattr(summary_response, 'content') else str(summary_response)
 
     # Create a source identifier with credibility indicator
@@ -62,7 +78,7 @@ async def process_source(
     else:
         source_key = source_title
 
-    return (source_key, findings, credibility_score)
+    return source_key, findings, credibility_score
 
 
 async def conduct_initial_research(state: SubResearcherGraphState) -> SubResearcherGraphState:
@@ -75,22 +91,40 @@ async def conduct_initial_research(state: SubResearcherGraphState) -> SubResearc
     subtopic = state["subtopic"]
     main_topic = state.get("main_topic", "")
     current_depth = state.get("research_depth", 1)
+    max_search_results = state.get("max_search_results", 5)
+    search_api = state.get("search_api", "tavily")
 
-    print(f"[Layer {current_depth}] Starting research on: {subtopic}")
+    print(f"[Layer {current_depth}] Starting research on: {subtopic} (api={search_api}, max_results={max_search_results})")
 
-    # Perform Tavily search (wrap in thread to avoid blocking)
-    # Use subtopic directly since it should now include main topic constraints
-    # But if main_topic is provided and subtopic seems generic, enhance the query
+    # Enhance query if needed
     search_query = subtopic
     if main_topic and len(subtopic.split()) < 5:
         # Subtopic is short/generic, prepend main topic context
         search_query = f"{main_topic}: {subtopic}"
-    search_func = partial(
-        tavily_client.search,
-        query=search_query,
-        search_depth="advanced",
-        max_results=8  # Get more results for filtering
-    )
+
+    # Select search client based on API
+    if search_api == "serper" and serper_client:
+        search_func = partial(
+            serper_client.search,
+            query=search_query,
+            max_results=max_search_results
+        )
+    elif search_api == "tavily":
+        search_func = partial(
+            tavily_client.search,
+            query=search_query,
+            search_depth="advanced",
+            max_results=max_search_results
+        )
+    else:
+        print(f"[WARNING] Search API '{search_api}' not available, falling back to Tavily")
+        search_func = partial(
+            tavily_client.search,
+            query=search_query,
+            search_depth="advanced",
+            max_results=max_search_results
+        )
+
     search_response = await asyncio.to_thread(search_func)
 
     # Filter sources by quality
@@ -104,7 +138,7 @@ async def conduct_initial_research(state: SubResearcherGraphState) -> SubResearc
 
     # Process sources in parallel
     tasks = [
-        process_source(result, subtopic, credibility)
+        process_source(result, subtopic, main_topic, credibility)
         for result, credibility in top_sources
     ]
     source_data = await asyncio.gather(*tasks)
@@ -137,11 +171,14 @@ async def analyze_and_generate_follow_ups(state: SubResearcherGraphState) -> Sub
     for deeper research layers
     """
     subtopic = state["subtopic"]
+    main_topic = state.get("main_topic", "")
+    other_subtopics = state.get("other_subtopics", [])
     research_results = state.get("research_results", {})
     current_depth = state.get("research_depth", 1)
+    max_research_depth = state.get("max_research_depth", 2)
 
-    if current_depth >= 3:  # Max depth reached
-        print(f"[Layer {current_depth}] Max depth reached, no follow-ups needed")
+    if current_depth >= max_research_depth:  # Max depth reached
+        print(f"[Layer {current_depth}] Max depth reached ({max_research_depth}), no follow-ups needed")
         return {"follow_up_queries": []}
 
     # Build summary of current findings
@@ -149,28 +186,42 @@ async def analyze_and_generate_follow_ups(state: SubResearcherGraphState) -> Sub
     for i, (source, findings) in enumerate(list(research_results.items())[:5]):
         findings_summary += f"Source {i+1}: {findings[:200]}...\n\n"
 
+    # Build context about other subtopics being researched
+    other_subtopics_context = ""
+    if other_subtopics:
+        other_areas = [st for st in other_subtopics if st != subtopic]
+        if other_areas:
+            other_subtopics_context = f"""
+    NOTE: Other researchers are covering these related areas:
+    {chr(10).join(f'- {st}' for st in other_areas[:5])}
+
+    Focus your follow-up queries on aspects unique to YOUR subtopic that won't overlap with the above.
+    """
+
     analysis_prompt = f"""
     You are analyzing research on the subtopic: {subtopic}
+    Main research topic: {main_topic}
 
     Current research findings:
     {findings_summary}
-
-    This is research layer {current_depth} of 3.
+    {other_subtopics_context}
+    This is research layer {current_depth} of {max_research_depth}.
 
     Analyze the findings and identify 2-3 specific follow-up queries that would:
-    1. Fill gaps in coverage
-    2. Explore promising areas in more depth
+    1. Fill gaps in coverage THAT IS DIRECTLY RELEVANT TO THE MAIN TOPIC AND SUBTOPIC
+    2. Explore promising areas in more depth (still needs to be directly relevant)
     3. Clarify ambiguous or interesting points
     4. Find more recent or specialized information
 
     Each query should be specific and different from the original subtopic query.
+    IMPORTANT: Do NOT generate queries that overlap with other subtopics being researched.
 
     Return ONLY the queries, one per line, without numbering or bullets.
     If the research seems comprehensive, return "COMPREHENSIVE" instead.
     """
 
     messages = [
-        SystemMessage(content="You are a research analyst that identifies gaps and generates follow-up research queries."),
+        SystemMessage(content="You are a research analyst that identifies gaps and generates follow-up research queries. You avoid duplicating work being done by other researchers."),
         HumanMessage(content=analysis_prompt)
     ]
 
@@ -201,14 +252,17 @@ async def conduct_deep_dive_research(state: SubResearcherGraphState) -> SubResea
     """
     follow_up_queries = state.get("follow_up_queries", [])
     subtopic = state["subtopic"]
+    main_topic = state.get("main_topic", "")
     current_depth = state.get("research_depth", 1)
+    max_search_results = state.get("max_search_results", 5)
+    search_api = state.get("search_api", "tavily")
 
     if not follow_up_queries:
         print(f"[Layer {current_depth}] No follow-up queries, skipping deep dive")
         return {}
 
     new_depth = current_depth + 1
-    print(f"[Layer {new_depth}] Conducting deep dive with {len(follow_up_queries)} queries")
+    print(f"[Layer {new_depth}] Conducting deep dive with {len(follow_up_queries)} queries (api={search_api}, max_results={max_search_results})")
 
     existing_results = state.get("research_results", {})
     existing_credibilities = state.get("source_credibilities", {})
@@ -217,12 +271,29 @@ async def conduct_deep_dive_research(state: SubResearcherGraphState) -> SubResea
     for query in follow_up_queries[:2]:  # Limit to 2 queries per layer
         print(f"[Layer {new_depth}] Searching: {query}")
 
-        search_func = partial(
-            tavily_client.search,
-            query=query,
-            search_depth="advanced",
-            max_results=5
-        )
+        # Select search client based on API
+        if search_api == "serper" and serper_client:
+            search_func = partial(
+                serper_client.search,
+                query=query,
+                max_results=max_search_results
+            )
+        elif search_api == "tavily":
+            search_func = partial(
+                tavily_client.search,
+                query=query,
+                search_depth="advanced",
+                max_results=max_search_results
+            )
+        else:
+            print(f"[WARNING] Search API '{search_api}' not available, falling back to Tavily")
+            search_func = partial(
+                tavily_client.search,
+                query=query,
+                search_depth="advanced",
+                max_results=max_search_results
+            )
+
         search_response = await asyncio.to_thread(search_func)
 
         results = search_response.get("results", [])
@@ -233,7 +304,7 @@ async def conduct_deep_dive_research(state: SubResearcherGraphState) -> SubResea
 
         # Process sources
         tasks = [
-            process_source(result, subtopic, credibility)
+            process_source(result, subtopic, main_topic, credibility)
             for result, credibility in top_sources
         ]
         source_data = await asyncio.gather(*tasks)
@@ -261,13 +332,14 @@ def should_continue_deep_dive(state: SubResearcherGraphState) -> str:
     """
     follow_up_queries = state.get("follow_up_queries", [])
     current_depth = state.get("research_depth", 1)
+    max_research_depth = state.get("max_research_depth", 2)
 
     # If we have follow-up queries and haven't reached max depth, continue
-    if follow_up_queries and current_depth < 3:
-        print(f"should_continue_deep_dive: YES (depth={current_depth}, queries={len(follow_up_queries)})")
+    if follow_up_queries and current_depth < max_research_depth:
+        print(f"should_continue_deep_dive: YES (depth={current_depth}/{max_research_depth}, queries={len(follow_up_queries)})")
         return "continue"
 
-    print(f"should_continue_deep_dive: NO (depth={current_depth}, queries={len(follow_up_queries)})")
+    print(f"should_continue_deep_dive: NO (depth={current_depth}/{max_research_depth}, queries={len(follow_up_queries)})")
     return "end"
 
 
