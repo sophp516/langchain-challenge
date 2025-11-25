@@ -169,9 +169,9 @@ function ChatTab({ agentConfig }: ChatTabProps) {
           report_footnotes: [],
           report_endnotes: [],
           scores: {},
-          research_gaps: [],
           revision_count: 0,
-          final_score: 0
+          final_score: 0,
+          evaluator_feedback: ''
         }
 
         streamIterator = client.runs.stream(

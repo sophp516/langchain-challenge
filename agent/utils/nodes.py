@@ -1496,7 +1496,6 @@ def prompt_for_feedback(state: dict) -> dict:
     This runs after display_final_report and before collect_user_feedback.
     """
     user_feedback_list = state.get("user_feedback", [])
-    final_score = state.get("final_score", 0)
 
     print(f"prompt_for_feedback: displaying prompt (round {len(user_feedback_list) + 1})")
 

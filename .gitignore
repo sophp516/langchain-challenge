@@ -43,3 +43,4 @@ logs/
 *.sw?
 
 .langgraph_api/
+.claude
