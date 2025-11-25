@@ -52,7 +52,6 @@ def create_agent(use_checkpointer=False):
 
     # Evaluation Nodes (after user is satisfied)
     workflow.add_node("evaluate_report", evaluate_report)
-    workflow.add_node("identify_gaps", identify_report_gaps)
 
     # Entry Point - Intent Check
     workflow.set_entry_point("check_user_intent")
@@ -122,17 +121,7 @@ def create_agent(use_checkpointer=False):
         route_after_evaluation,
         {
             "finalize": "display_report",
-            "revise": "identify_gaps"
-        }
-    )
-
-    # Gap identification leads to targeted revision (not full regeneration)
-    workflow.add_conditional_edges(
-        "identify_gaps",
-        route_after_gap_identification,
-        {
-            "regenerate": "revise_sections",  # Targeted revision instead of full regeneration
-            "finalize": "display_report"
+            "revise": "revise_sections"  # Revise directly based on evaluator feedback
         }
     )
 

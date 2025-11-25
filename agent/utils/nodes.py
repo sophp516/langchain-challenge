@@ -37,10 +37,7 @@ def format_source_as_markdown_link(source: str) -> str:
     return source
 
 
-# Create ToolNode for report tools
 report_tool_node = ToolNode(report_tools)
-
-# Bind tools to LLM for tool calling
 llm_with_tools = llm.bind_tools(report_tools)
 
 
@@ -763,12 +760,10 @@ async def generate_outline(state: dict) -> dict:
     """
     Generate a structured outline for the report based on research
     Maps subtopics to sections with specific focus areas
-    Uses identified gaps to improve the outline on revision rounds
     """
 
     topic = state.get("topic", "")
     sub_researchers = state.get("sub_researchers", [])
-    research_gaps = state.get("research_gaps", [])
     revision_count = state.get("revision_count", 0)
 
     print(f"generate_outline: creating outline for topic='{topic[:50]}...' (revision {revision_count})")
@@ -780,24 +775,12 @@ async def generate_outline(state: dict) -> dict:
         sources = len(researcher.get("research_results", {}))
         research_overview += f"- {subtopic} ({sources} sources)\n"
 
-    # Build gaps section if this is a revision
-    gaps_section = ""
-    if research_gaps and revision_count > 0:
-        gaps_section = "\n\n**IMPORTANT - Address these gaps from previous version:**\n"
-        for i, gap in enumerate(research_gaps, 1):
-            gap_desc = gap.get("gap_description", "") if isinstance(gap, dict) else gap.gap_description
-            gap_type = gap.get("gap_type", "") if isinstance(gap, dict) else gap.gap_type
-            priority = gap.get("priority", "") if isinstance(gap, dict) else gap.priority
-            gaps_section += f"{i}. [{priority.upper()}] {gap_desc} (type: {gap_type})\n"
-        gaps_section += "\nYour outline MUST include sections that specifically address these gaps.\n"
-
     outline_prompt = f"""
     You are a report outline specialist. Create a structured outline that DIRECTLY ANSWERS the main research question.
 
     MAIN RESEARCH QUESTION: {topic}
 
     {research_overview}
-    {gaps_section}
 
     CRITICAL: Organize sections by THEMES and ANSWERS, not by subtopics.
     - If the same entity (person, song, product, etc.) appears in multiple subtopics' research, it should be discussed TOGETHER, not separately
@@ -821,7 +804,6 @@ async def generate_outline(state: dict) -> dict:
     - Section title (focused on answering the main question)
     - Key questions to address (what specific answers should this section provide?)
     - Which subtopics have relevant data (for reference, but section should synthesize across all)
-    {"- How it addresses the identified gaps" if gaps_section else ""}
 
     Return as a JSON object with this structure:
     {{
@@ -902,7 +884,6 @@ async def write_single_section(
     topic: str,
     research_by_subtopic: dict,
     min_credibility_score: float,
-    gaps: list = None,
     all_sections: list = None,
     section_index: int = 0
 ) -> dict:
@@ -910,14 +891,12 @@ async def write_single_section(
     Write a single section of the report with citations.
     This function is called in parallel for each section.
     If insufficient sources exist, performs additional web search.
-    Uses gaps information to improve section quality on revisions.
     Includes outline context to avoid overlap with other sections.
     """
     section_title = section.get("title", "")
     section_subtopics = section.get("subtopics", [])
     all_sections = all_sections or []
     MIN_SOURCES_THRESHOLD = 2  # Minimum sources needed before searching for more
-    gaps = gaps or []
 
     print(f"  Writing section: {section_title}")
 
@@ -958,17 +937,6 @@ async def write_single_section(
     # If still no research, note it
     if not relevant_research:
         relevant_research = "Limited sources available. Provide general analysis based on the topic."
-
-    # Build gaps instruction if this is a revision
-    gaps_instruction = ""
-    if gaps:
-        relevant_gaps = [g for g in gaps if g.get("priority") in ["high", "medium"]]
-        if relevant_gaps:
-            gaps_instruction = "\n\n**IMPORTANT - Address these issues from previous version:**\n"
-            for gap in relevant_gaps:
-                gap_desc = gap.get("gap_description", "")
-                gaps_instruction += f"- {gap_desc}\n"
-            gaps_instruction += "\nMake sure your section addresses these gaps with specific details and evidence.\n"
 
     # Build outline context to avoid overlap between sections
     outline_context = ""
@@ -1013,7 +981,6 @@ async def write_single_section(
     {outline_context}
     SOURCES (numbered for citation):
     {relevant_research[:5000]}
-    {gaps_instruction}
 
     **CRITICAL ANTI-HALLUCINATION RULES - VIOLATIONS ARE UNACCEPTABLE:**
     1. ONLY write about information that EXPLICITLY appears in the SOURCES above - word for word verification
@@ -1191,14 +1158,12 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
     """
     Write each section of the report with proper inline citations in parallel.
     Uses research results to build evidence-based sections.
-    Passes identified gaps to section writers for improved quality on revisions.
     """
     agent_config = get_config_from_configurable(config.get("configurable", {}))
 
     topic = state.get("topic", "")
     outline = state.get("report_outline", {})
     sub_researchers = state.get("sub_researchers", [])
-    research_gaps = state.get("research_gaps", [])
     revision_count = state.get("revision_count", 0)
 
     print(f"write_sections_with_citations: writing sections for topic='{topic[:50]}...' (revision {revision_count})")
@@ -1206,7 +1171,7 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
 
     sections = outline.get("sections", [])
 
-    # Build research lookup by subtopic (includes gap research from follow-up queries)
+    # Build research lookup by subtopic
     research_by_subtopic = {}
     for researcher in sub_researchers:
         subtopic = researcher.get("subtopic", "")
@@ -1215,27 +1180,12 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
             "credibilities": researcher.get("source_credibilities", {})
         }
 
-    # Also add gap research to a general pool accessible by all sections
-    gap_research = {}
-    for researcher in sub_researchers:
-        subtopic = researcher.get("subtopic", "")
-        if subtopic.startswith("[Gap Research]"):
-            for source, content in researcher.get("research_results", {}).items():
-                gap_research[source] = content
-
-    if gap_research:
-        research_by_subtopic["[Gap Research]"] = {
-            "results": gap_research,
-            "credibilities": {s: 0.7 for s in gap_research.keys()}
-        }
-        print(f"write_sections_with_citations: added {len(gap_research)} gap research sources")
-
-    # Write all sections in parallel, passing gaps and outline context to avoid redundancy
+    # Write all sections in parallel with outline context to avoid redundancy
     print(f"write_sections_with_citations: writing {len(sections)} sections in parallel with outline context")
     tasks = [
         write_single_section(
             section, topic, research_by_subtopic, agent_config.min_credibility_score,
-            research_gaps, all_sections=sections, section_index=idx
+            all_sections=sections, section_index=idx
         )
         for idx, section in enumerate(sections)
     ]
@@ -1344,136 +1294,29 @@ async def evaluate_report(state: dict) -> dict:
 
     return {
         "scores": scores,
-        "final_score": score
-    }
-
-
-async def identify_report_gaps(state: dict) -> dict:
-    """
-    Analyze the report and identify gaps that need addressing.
-    Uses gap analysis utility to find issues, then executes follow-up
-    queries to gather additional research for each gap.
-    """
-    from utils.gap_analysis import analyze_report_gaps
-
-    topic = state.get("topic", "")
-    report_content = state.get("report_content", "")
-    sub_researchers = state.get("sub_researchers", [])
-    final_score = state.get("final_score", 0)
-
-    print(f"identify_report_gaps: analyzing report with score={final_score}")
-
-    # Use gap analysis to find issues
-    gaps = await analyze_report_gaps(topic, report_content, sub_researchers)
-
-    # Convert ResearchGap objects to dicts for state storage (including affected_sections)
-    gaps_dicts = [
-        {
-            "gap_description": gap.gap_description,
-            "gap_type": gap.gap_type,
-            "priority": gap.priority,
-            "follow_up_query": gap.follow_up_query,
-            "affected_sections": gap.affected_sections
-        }
-        for gap in gaps
-    ]
-
-    revision_count = state.get("revision_count", 0) + 1
-    print(f"identify_report_gaps: found {len(gaps_dicts)} gaps (revision {revision_count})")
-
-    # Execute follow-up queries for high/medium priority gaps to enrich research
-    updated_sub_researchers = list(sub_researchers)  # Copy existing researchers
-
-    async def execute_follow_up(gap_dict: dict) -> dict | None:
-        """Execute a follow-up query and return research results"""
-        query = gap_dict.get("follow_up_query", "")
-        if not query or query.lower().startswith("n/a"):
-            return None
-
-        try:
-            loop = asyncio.get_event_loop()
-            search_results = await loop.run_in_executor(
-                None,
-                lambda: tavily_client.search(query=query, max_results=3)
-            )
-            results = search_results.get("results", [])
-            if results:
-                research_results = {}
-                source_credibilities = {}
-                for result in results:
-                    url = result.get("url", "")
-                    content = result.get("content", "")
-                    if url and content:
-                        research_results[url] = content
-                        source_credibilities[url] = 0.7  # Default credibility for follow-up
-
-                return {
-                    "subtopic_id": len(updated_sub_researchers),
-                    "subtopic": f"[Gap Research] {gap_dict.get('gap_description', '')[:50]}...",
-                    "research_results": research_results,
-                    "source_credibilities": source_credibilities,
-                    "research_depth": 1
-                }
-        except Exception as e:
-            print(f"identify_report_gaps: follow-up search failed: {e}")
-        return None
-
-    # Execute follow-up queries for high and medium priority gaps
-    high_medium_gaps = [g for g in gaps_dicts if g.get("priority") in ["high", "medium"]]
-    if high_medium_gaps:
-        print(f"identify_report_gaps: executing {len(high_medium_gaps)} follow-up queries")
-        follow_up_tasks = [execute_follow_up(gap) for gap in high_medium_gaps]
-        follow_up_results = await asyncio.gather(*follow_up_tasks)
-
-        for result in follow_up_results:
-            if result:
-                updated_sub_researchers.append(result)
-                print(f"  Added gap research: {result.get('subtopic', '')[:50]}...")
-
-    return {
-        "research_gaps": gaps_dicts,
-        "revision_count": revision_count,
-        "sub_researchers": updated_sub_researchers
+        "final_score": score,
+        "evaluator_feedback": feedback_text  # Store feedback for revision context
     }
 
 
 async def revise_sections(state: dict, config: RunnableConfig) -> dict:
     """
-    Targeted revision: Only rewrite sections that are affected by identified gaps.
-    Much more efficient than regenerating the entire report.
+    Revise all sections based on evaluator feedback from Gemini.
+    Uses the evaluator's qualitative feedback to guide improvements.
     """
     agent_config = get_config_from_configurable(config.get("configurable", {}))
 
     topic = state.get("topic", "")
     report_sections = state.get("report_sections", [])
-    research_gaps = state.get("research_gaps", [])
     sub_researchers = state.get("sub_researchers", [])
     revision_count = state.get("revision_count", 0)
+    evaluator_feedback = state.get("evaluator_feedback", "")
 
-    print(f"revise_sections: starting targeted revision (revision {revision_count})")
+    print(f"revise_sections: starting revision based on evaluator feedback (revision {revision_count})")
+    print(f"revise_sections: feedback preview: {evaluator_feedback[:200]}...")
 
-    # Collect all affected sections from gaps
-    sections_to_revise = set()
-    gaps_by_section = {}
-
-    for gap in research_gaps:
-        affected = gap.get("affected_sections", [])
-        priority = gap.get("priority", "low")
-
-        # Only consider high/medium priority gaps
-        if priority not in ["high", "medium"]:
-            continue
-
-        for section_title in affected:
-            sections_to_revise.add(section_title)
-            if section_title not in gaps_by_section:
-                gaps_by_section[section_title] = []
-            gaps_by_section[section_title].append(gap)
-
-    print(f"revise_sections: {len(sections_to_revise)} sections need revision: {list(sections_to_revise)}")
-
-    if not sections_to_revise:
-        print("revise_sections: no sections to revise, returning unchanged")
+    if not evaluator_feedback or evaluator_feedback == "N/A":
+        print("revise_sections: no evaluator feedback available, returning unchanged")
         return {}
 
     # Build research lookup (same as write_sections_with_citations)
@@ -1485,68 +1328,37 @@ async def revise_sections(state: dict, config: RunnableConfig) -> dict:
             "credibilities": researcher.get("source_credibilities", {})
         }
 
-    # Add gap research to pool
-    gap_research = {}
-    for researcher in sub_researchers:
-        subtopic = researcher.get("subtopic", "")
-        if subtopic.startswith("[Gap Research]"):
-            for source, content in researcher.get("research_results", {}).items():
-                gap_research[source] = content
-
-    if gap_research:
-        research_by_subtopic["[Gap Research]"] = {
-            "results": gap_research,
-            "credibilities": {s: 0.7 for s in gap_research.keys()}
-        }
-
-    # Revise only affected sections
-    revised_sections = []
+    # Revise all sections based on evaluator feedback
+    print(f"revise_sections: revising all {len(report_sections)} sections")
     tasks = []
 
     for section in report_sections:
         section_title = section.get("title", "")
+        print(f"  Revising section: {section_title}")
 
-        if section_title in sections_to_revise:
-            # This section needs revision - pass its specific gaps
-            section_gaps = gaps_by_section.get(section_title, [])
-            print(f"  Revising section: {section_title} ({len(section_gaps)} gaps)")
+        # Create a modified section dict with subtopics for research lookup
+        section_dict = {
+            "title": section_title,
+            "subtopics": section.get("subtopics", []),
+            "key_questions": section.get("key_questions", []),
+            "original_content": section.get("content", "")
+        }
 
-            # Create a modified section dict with subtopics for research lookup
-            section_dict = {
-                "title": section_title,
-                "subtopics": section.get("subtopics", []),
-                "key_questions": section.get("key_questions", []),
-                "original_content": section.get("content", "")
-            }
-
-            tasks.append(revise_single_section(
-                section_dict,
-                topic,
-                research_by_subtopic,
-                agent_config.min_credibility_score,
-                section_gaps
-            ))
-        else:
-            # Keep section unchanged
-            print(f"  Keeping section unchanged: {section_title}")
-            revised_sections.append(section)
+        tasks.append(revise_single_section(
+            section_dict,
+            topic,
+            research_by_subtopic,
+            agent_config.min_credibility_score,
+            evaluator_feedback  # Pass evaluator feedback instead of section-specific gaps
+        ))
 
     # Execute revisions in parallel
-    if tasks:
-        revised_results = await asyncio.gather(*tasks)
-        # Merge revised sections in correct order
-        revised_idx = 0
-        final_sections = []
-        for section in report_sections:
-            section_title = section.get("title", "")
-            if section_title in sections_to_revise:
-                final_sections.append(revised_results[revised_idx])
-                revised_idx += 1
-            else:
-                final_sections.append(section)
-        revised_sections = final_sections
+    revised_sections = await asyncio.gather(*tasks)
 
-    print(f"revise_sections: completed revision of {len(tasks)} sections")
+    print(f"revise_sections: completed revision of {len(revised_sections)} sections")
+
+    # Increment revision count
+    new_revision_count = revision_count + 1
 
     # Rebuild full report from sections
     full_report = f"# {topic}\n\n"
@@ -1587,11 +1399,11 @@ async def revise_single_section(
     topic: str,
     research_by_subtopic: dict,
     min_credibility_score: float,
-    section_gaps: list
+    evaluator_feedback: str
 ) -> dict:
     """
-    Revise a single section to address specific gaps.
-    Uses the original content as a base and improves it.
+    Revise a single section based on evaluator feedback from Gemini.
+    Uses the original content as a base and improves it according to the feedback.
     """
     section_title = section.get("title", "")
     original_content = section.get("original_content", "")
@@ -1608,22 +1420,10 @@ async def revise_single_section(
             results = research_by_subtopic[subtopic]["results"]
             credibilities = research_by_subtopic[subtopic]["credibilities"]
 
-            for source, findings in list(results.items())[:3]:
+            for source, findings in list(results.items())[:5]:  # Top 5 sources for better coverage
                 if credibilities.get(source, 0.5) >= min_credibility_score:
                     relevant_research += f"\nSource: {source}\n{findings}\n"
                     sources_list.append(source)
-
-    # Also include gap research
-    if "[Gap Research]" in research_by_subtopic:
-        gap_results = research_by_subtopic["[Gap Research]"]["results"]
-        for source, findings in list(gap_results.items())[:3]:
-            relevant_research += f"\nSource (gap research): {source}\n{findings}\n"
-            sources_list.append(source)
-
-    # Build gaps instruction
-    gaps_instruction = "\n**GAPS TO ADDRESS:**\n"
-    for gap in section_gaps:
-        gaps_instruction += f"- {gap.get('gap_description', '')}\n"
 
     revision_prompt = f"""
     You are revising the "{section_title}" section of a research report on: {topic}
@@ -1631,30 +1431,33 @@ async def revise_single_section(
     ORIGINAL CONTENT:
     {original_content}
 
-    {gaps_instruction}
+    **EVALUATOR FEEDBACK (address these improvement areas):**
+    {evaluator_feedback}
 
     SOURCES FOR REVISION:
-    {relevant_research[:2500]}
+    {relevant_research[:3000]}
 
     **STRICT GROUNDING RULES:**
     1. ONLY add information that appears in the SOURCES above
     2. Every new claim MUST cite a source
     3. DO NOT invent names, titles, dates, statistics, or facts not in sources
     4. DO NOT use placeholder names like "XYZ", "Company A", etc.
-    5. If sources don't provide enough info to fill a gap, acknowledge the limitation
-    6. It's better to leave a gap partially addressed than to fabricate information
+    5. If sources don't provide enough info to address feedback, acknowledge the limitation
+    6. It's better to make conservative improvements than to fabricate information
 
     INSTRUCTIONS:
     - Keep accurate parts of original content
-    - Address gaps ONLY with information from the sources provided
+    - Address the evaluator's feedback using ONLY information from the sources provided
+    - Improve coverage, evidence, structure, or clarity as suggested by the feedback
     - Add citations [1], [2] for all new claims
-    - If you cannot find source support for a gap, write: "Further research needed on [topic]"
+    - Enhance existing content with additional details from sources where relevant
+    - If sources don't support addressing specific feedback, note: "Additional research needed on [topic]"
 
     Return ONLY the revised section content (no title/header).
     """
 
     messages = [
-        SystemMessage(content="You are a research report editor who improves sections by addressing specific gaps while preserving good content."),
+        SystemMessage(content="You are a research report editor who improves sections based on evaluator feedback while maintaining strict adherence to sources. Never fabricate information."),
         HumanMessage(content=revision_prompt)
     ]
 
@@ -1919,30 +1722,6 @@ def route_after_evaluation(state: dict, config: RunnableConfig) -> str:
     # Otherwise, identify gaps and revise
     print(f"route_after_evaluation: score {final_score} < {agent_config.min_report_score}, identifying gaps for revision")
     return "revise"
-
-
-def route_after_gap_identification(state: dict) -> str:
-    """
-    Conditional edge: Route after identifying gaps
-    - If significant gaps exist: Go back to outline/rewrite
-    - If minor/no gaps: Finalize
-    """
-    research_gaps = state.get("research_gaps", [])
-    revision_count = state.get("revision_count", 0)
-
-    high_priority_gaps = [g for g in research_gaps if g.get("priority") == "high"]
-    medium_priority_gaps = [g for g in research_gaps if g.get("priority") == "medium"]
-
-    print(f"route_after_gap_identification: {len(high_priority_gaps)} high, {len(medium_priority_gaps)} medium priority gaps")
-
-    # If significant gaps exist, revise
-    if high_priority_gaps or medium_priority_gaps:
-        print("route_after_gap_identification: significant gaps found, regenerating outline")
-        return "regenerate"
-
-    # Otherwise, finalize
-    print("route_after_gap_identification: no significant gaps, finalizing")
-    return "finalize"
 
 
 def route_after_display_report(state: dict, config: RunnableConfig) -> str:

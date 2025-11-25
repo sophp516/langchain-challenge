@@ -48,9 +48,9 @@ class UnifiedAgentState(TypedDict):
     scores: dict[int, int]
 
     # Iterative improvement fields
-    research_gaps: list[dict]  # Identified gaps in research/report
     revision_count: int  # Number of revision iterations
     final_score: int  # Final evaluation score
+    evaluator_feedback: str  # Feedback from evaluator for revision
 
     # User feedback loop fields
     user_feedback: list[str]  # List of user's feedback on the report

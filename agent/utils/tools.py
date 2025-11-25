@@ -148,5 +148,4 @@ async def list_all_reports(limit: int = 20) -> dict:
         return {"error": str(e), "reports": []}
 
 
-# List of all available tools for easy import
 report_tools = [get_report, list_report_versions, list_all_reports]
