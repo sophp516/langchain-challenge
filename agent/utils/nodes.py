@@ -156,48 +156,51 @@ async def call_report_tools(state: dict) -> dict:
     return {"messages": [response]}
 
 
-async def format_tool_response(state: dict) -> dict:
+async def execute_and_format_tools(state: dict) -> dict:
     """
-    Format the tool response into a user-friendly message.
+    Merged node: Execute report tools and format the response.
+    Combines execute_tools (ToolNode) and format_tool_response to reduce graph execution cost.
     """
-    messages = state.get("messages", [])
+    # Step 1: Execute tools (ToolNode functionality)
+    tool_result = await report_tool_node.ainvoke(state)
+    merged_state = {**state, **tool_result}
+    messages = merged_state.get("messages", [])
 
-    # Find the last tool message
-    tool_result = None
+    # Step 2: Format the tool response
+    tool_result_data = None
     for msg in reversed(messages):
         if isinstance(msg, ToolMessage):
             try:
-                tool_result = json.loads(msg.content) if isinstance(msg.content, str) else msg.content
+                tool_result_data = json.loads(msg.content) if isinstance(msg.content, str) else msg.content
             except json.JSONDecodeError:
-                tool_result = {"raw": msg.content}
+                tool_result_data = {"raw": msg.content}
             break
 
-    if not tool_result:
-        return {"messages": [AIMessage(content="No results found.")]}
+    if not tool_result_data:
+        return {**tool_result, "messages": merged_state["messages"] + [AIMessage(content="No results found.")]}
 
     # Format based on result type
-    if isinstance(tool_result, dict):
-        if tool_result.get("error"):
-            response_text = f"Error: {tool_result['error']}"
-        elif tool_result.get("found") and tool_result.get("content"):
+    if isinstance(tool_result_data, dict):
+        if tool_result_data.get("error"):
+            response_text = f"Error: {tool_result_data['error']}"
+        elif tool_result_data.get("found") and tool_result_data.get("content"):
             # Format report with better visual hierarchy
-            report_id = tool_result.get('report_id', 'Unknown')
-            version_id = tool_result.get('version_id', 'N/A')
-            created_at = tool_result.get('created_at', 'Unknown date')
-            content = tool_result.get('content', 'No content available')
-            
-            # Create a nicely formatted header with metadata
+            report_id = tool_result_data.get('report_id', 'Unknown')
+            version_id = tool_result_data.get('version_id', 'N/A')
+            created_at = tool_result_data.get('created_at', 'Unknown date')
+            content = tool_result_data.get('content', 'No content available')
+
             response_text = f"""## 📄 Report: {report_id}
 
-**Version:** {version_id}  
+**Version:** {version_id}
 **Created:** {created_at}
 
 ---
 
 {content}"""
-        elif tool_result.get("versions"):
-            report_id = tool_result.get('report_id', 'Unknown')
-            versions = tool_result.get("versions", [])
+        elif tool_result_data.get("versions"):
+            report_id = tool_result_data.get('report_id', 'Unknown')
+            versions = tool_result_data.get("versions", [])
             versions_text = "\n\n".join([
                 f"### Version {v['version_id']}\n**Created:** {v['created_at']}\n\n{v.get('content_preview', 'No preview available')}"
                 for v in versions
@@ -206,8 +209,8 @@ async def format_tool_response(state: dict) -> dict:
 
 {versions_text}"""
         elif tool_result.get("reports"):
-            total_reports = tool_result.get('total_reports', 0)
-            reports = tool_result.get("reports", [])
+            total_reports = tool_result_data.get('total_reports', 0)
+            reports = tool_result_data.get("reports", [])
             reports_text = "\n".join([
                 f"- **{r['report_id']}** | Version: {r['latest_version']} | Created: {r['created_at']}"
                 for r in reports
@@ -215,16 +218,16 @@ async def format_tool_response(state: dict) -> dict:
             response_text = f"""## 📚 Available Reports ({total_reports})
 
 {reports_text}"""
-        elif tool_result.get("found") == False:
-            response_text = tool_result.get("error", "Report not found.")
+        elif tool_result_data.get("found") == False:
+            response_text = tool_result_data.get("error", "Report not found.")
         else:
-            response_text = f"Result: {json.dumps(tool_result, indent=2)}"
+            response_text = f"Result: {json.dumps(tool_result_data, indent=2)}"
     else:
-        response_text = str(tool_result)
+        response_text = str(tool_result_data)
 
-    print(f"format_tool_response: formatted response")
+    print(f"execute_and_format_tools: executed tools and formatted response")
 
-    return {"messages": [AIMessage(content=response_text)]}
+    return {**tool_result, "messages": merged_state["messages"] + [AIMessage(content=response_text)]}
 
 
 def route_after_intent_check(state: dict) -> str:

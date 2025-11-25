@@ -26,8 +26,7 @@ def create_agent(use_checkpointer=False):
     # Intent Routing Nodes
     workflow.add_node("check_user_intent", check_user_intent)
     workflow.add_node("call_report_tools", call_report_tools)
-    workflow.add_node("execute_tools", report_tool_node)
-    workflow.add_node("format_tool_response", format_tool_response)
+    workflow.add_node("execute_and_format_tools", execute_and_format_tools)  # MERGED: execute_tools + format_tool_response
 
     # Topic Inquiry Nodes
     workflow.add_node("check_initial_context", check_initial_context)
@@ -71,12 +70,11 @@ def create_agent(use_checkpointer=False):
         "call_report_tools",
         should_continue_tools,
         {
-            "execute": "execute_tools",
+            "execute": "execute_and_format_tools",
             "end": END
         }
     )
-    workflow.add_edge("execute_tools", "format_tool_response")
-    workflow.add_edge("format_tool_response", END)
+    workflow.add_edge("execute_and_format_tools", END)
 
     # Topic Inquiry Flow
     workflow.add_conditional_edges(
