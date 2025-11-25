@@ -58,6 +58,20 @@ body {
   gap: 0.25rem;
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;
+  justify-content: space-between;
+}
+
+.nav-buttons-top {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.nav-buttons-bottom {
+  display: flex;
+  flex-direction: column;
+  margin-top: auto;
+  padding-top: 1rem;
 }
 
 .nav-button {
@@ -109,6 +123,16 @@ body {
   font-size: 0.8rem;
   font-weight: 600;
   white-space: nowrap;
+}
+
+.settings-nav-button {
+  margin-top: auto;
+}
+
+.settings-nav-button:hover {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  transform: translateX(2px);
 }
 
 /* Main Content */

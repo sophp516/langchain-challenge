@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect } from 'react'
 import { Client } from '@langchain/langgraph-sdk'
-import { Send, Loader2 } from "lucide-react"
+import { Send, Loader2, Plus } from "lucide-react"
 import ReactMarkdown from 'react-markdown'
 import { createThread as createThreadInDb, appendMessage } from '../services/db'
-import { SettingsModal, type AgentConfig } from './SettingsModal'
+import type { AgentConfig } from './SettingsModal'
 import './ChatTab.css'
 
 interface Message {
@@ -28,48 +28,20 @@ const getClient = () => {
   return client
 }
 
-const defaultConfig: AgentConfig = {
-  search_api: 'tavily',
-  max_search_results: 5,
-  max_research_depth: 2,
-  num_subtopics: 4,
-  max_clarification_rounds: 3,
-  min_report_score: 85,
-  max_revision_rounds: 2,
-  enable_user_feedback: true,
-  enable_cross_verification: false,
-  min_credibility_score: 0.5
+interface ChatTabProps {
+  agentConfig: AgentConfig
 }
 
-function ChatTab() {
+function ChatTab({ agentConfig }: ChatTabProps) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [currentThreadId, setCurrentThreadId] = useState<string | undefined>(undefined)
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
-  const [agentConfig, setAgentConfig] = useState<AgentConfig>(defaultConfig)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const sendButtonRef = useRef<HTMLButtonElement>(null)
+  const newThreadButtonRef = useRef<HTMLButtonElement>(null)
   const processedMessagesCountRef = useRef<number>(0) // Track how many backend messages we've processed
-
-  // Load configuration from localStorage on mount
-  useEffect(() => {
-    const savedConfig = localStorage.getItem('agentConfig')
-    if (savedConfig) {
-      try {
-        const parsed = JSON.parse(savedConfig)
-        setAgentConfig({ ...defaultConfig, ...parsed })
-      } catch (e) {
-        console.error('Failed to parse saved config:', e)
-      }
-    }
-  }, [])
-
-  const handleConfigSave = (config: AgentConfig) => {
-    setAgentConfig(config)
-    localStorage.setItem('agentConfig', JSON.stringify(config))
-  }
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -83,6 +55,7 @@ function ChatTab() {
   useEffect(() => {
     const textarea = textareaRef.current
     const sendButton = sendButtonRef.current
+    const newThreadButton = newThreadButtonRef.current
     if (textarea) {
       textarea.style.height = 'auto'
       const scrollHeight = textarea.scrollHeight
@@ -93,9 +66,12 @@ function ChatTab() {
         : minHeight
       textarea.style.height = `${newHeight}px`
       
-      // Match button height to textarea height
+      // Match button heights to textarea height
       if (sendButton) {
         sendButton.style.height = `${newHeight}px`
+      }
+      if (newThreadButton) {
+        newThreadButton.style.height = `${newHeight}px`
       }
     }
   }, [input])
@@ -113,9 +89,12 @@ function ChatTab() {
     const userInput = input.trim()
     setMessages(prev => [...prev, userMessage])
     setInput('')
-    // Reset button height
+    // Reset button heights
     if (sendButtonRef.current) {
       sendButtonRef.current.style.height = '44px'
+    }
+    if (newThreadButtonRef.current) {
+      newThreadButtonRef.current.style.height = '44px'
     }
     setIsLoading(true)
 
@@ -294,6 +273,23 @@ function ChatTab() {
     }
   }
 
+  const handleNewThread = () => {
+    setMessages([])
+    setCurrentThreadId(undefined)
+    processedMessagesCountRef.current = 0
+    setInput('')
+    // Reset button heights
+    if (sendButtonRef.current) {
+      sendButtonRef.current.style.height = '44px'
+    }
+    if (newThreadButtonRef.current) {
+      newThreadButtonRef.current.style.height = '44px'
+    }
+    if (textareaRef.current) {
+      textareaRef.current.style.height = '44px'
+    }
+  }
+
   return (
     <div className="chat-tab">
       <div className="chat-messages">
@@ -336,20 +332,16 @@ function ChatTab() {
         <div ref={messagesEndRef} />
       </div>
 
-      <div className="settings-container">
-        <button className="settings-button" onClick={() => setIsSettingsOpen(true)}>
-          Settings
-        </button>
-      </div>
-
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        onSave={handleConfigSave}
-        currentConfig={agentConfig}
-      />
-
       <div className="chat-input-container">
+        <button
+          ref={newThreadButtonRef}
+          className="new-thread-button"
+          onClick={handleNewThread}
+          disabled={isLoading}
+          title="Start New Thread"
+        >
+          <Plus size={20} />
+        </button>
         <textarea
           ref={textareaRef}
           className="chat-input"

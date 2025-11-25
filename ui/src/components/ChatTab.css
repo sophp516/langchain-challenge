@@ -349,27 +349,38 @@
   cursor: not-allowed;
 }
 
-.settings-container {
-  padding: 0.25rem 2rem;
-  display: flex;
-  justify-content: flex-end;
-}
-
-.settings-button {
-  padding: 0.5rem 1rem;
+.new-thread-button {
+  padding: 0;
   background: var(--bg-primary);
   color: var(--text-primary);
   border: 1px solid var(--border-color);
-  border-radius: 6px;
-  font-size: 0.9rem;
-  font-weight: 500;
+  border-radius: 8px;
+  font-size: 1.2rem;
   cursor: pointer;
   transition: all 0.2s;
+  min-width: 44px;
+  min-height: 44px;
+  max-height: 200px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-start;
 }
 
-.settings-button:hover {
+.new-thread-button:hover:not(:disabled) {
   background: var(--bg-secondary);
   border-color: var(--text-tertiary);
+  transform: scale(1.05);
+}
+
+.new-thread-button:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+.new-thread-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Scrollbar styling */
