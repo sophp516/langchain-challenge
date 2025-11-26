@@ -6,7 +6,7 @@ from utils.model import llm, llm_quality, evaluator_llm
 from utils.subresearcher import subresearcher_graph
 from utils.verification import verify_research_cross_references
 from utils.db import save_report
-from utils.configuration import get_config_from_configurable, tavily_client
+from utils.configuration import get_config_from_configurable, tavily_client, serper_client
 from utils.tools import report_tools
 import asyncio, json, re, uuid
 
@@ -508,104 +508,6 @@ def collect_user_response(state: dict) -> dict:
 
 
 
-async def generate_subtopics(state: dict, config: RunnableConfig) -> dict:
-    """
-    Generate DISCOVERY research queries to find actual entities that answer the question.
-    This is Phase 1: Broad research to discover what entities (games, products, people) exist.
-    Phase 2 (outline generation) will organize these entities into sections.
-    """
-
-    agent_config = get_config_from_configurable(config.get("configurable", {}))
-
-    topic = state.get("topic", "")
-    print(f"generate_subtopics: starting discovery research for topic='{topic[:50]}...'")
-
-    # Create structured output model for subtopics
-    SubtopicsOutput = create_model(
-        'SubtopicsOutput',
-        subtopics=(list[str], ...)
-    )
-
-    structured_llm = llm_quality.with_structured_output(SubtopicsOutput)
-
-    prompt = f"""
-    Generate 2-3 BROAD search queries that are variations/rephrases of the main topic.
-    These will do initial research to discover entities. Keep them broad and search-friendly.
-
-    Topic: {topic}
-
-    Generate queries that:
-    - Rephrase the main topic in different ways
-    - Use synonyms and alternative search terms
-    - Include keywords like "top", "best", "list", "popular", "upcoming"
-
-    Example for "mobile games":
-    - "Best mobile games 2024"
-    - "Top mobile gaming apps rankings"
-    - "Most popular mobile games list"
-
-    Example for "MMORPG 2026":
-    - "Top MMORPGs releasing 2026"
-    - "Best upcoming MMORPG launches"
-    - "Most anticipated MMORPG games"
-
-    Generate 2-3 broad queries for: "{topic}"
-    """
-
-    llm_response = await structured_llm.ainvoke([
-        SystemMessage(content="Generate 2-3 broad search queries that are variations of the main topic. Keep them simple and search-friendly."),
-        HumanMessage(content=prompt)
-    ])
-
-    broad_queries = llm_response.subtopics[:3]  # Limit to 3
-    print(f"generate_subtopics: generated {len(broad_queries)} broad queries")
-    for q in broad_queries:
-        print(f"  - {q}")
-
-    # Pass broad queries to subresearcher (which will do iterative deepening internally)
-    async def process_broad_query(idx: int, query: str, main_topic: str):
-        """Process a single broad query through subresearcher (which does iterative deepening)"""
-        subgraph_state = {
-            "subtopic_id": idx,
-            "subtopic": query,  # Broad query
-            "main_topic": main_topic,
-            "other_subtopics": broad_queries,
-            "research_results": {},
-            "research_depth": 1,
-            "source_credibilities": {},
-            "max_search_results": agent_config.max_search_results,
-            "max_research_depth": agent_config.max_research_depth,
-            "search_api": agent_config.search_api
-        }
-
-        result = await subresearcher_graph.ainvoke(subgraph_state)
-
-        return {
-            "subtopic_id": idx,
-            "subtopic": query,
-            "research_results": result.get("research_results", {}),
-            "source_credibilities": result.get("source_credibilities", {}),
-            "research_depth": result.get("research_depth", 1)
-        }
-
-    tasks = [process_broad_query(idx, query, topic) for idx, query in enumerate(broad_queries)]
-    print(f"generate_subtopics: sending {len(tasks)} broad queries to subresearcher for iterative deepening")
-    sub_researchers = await asyncio.gather(*tasks)
-    print(f"generate_subtopics: completed {len(sub_researchers)} subresearchers")
-
-    for researcher in sub_researchers:
-        depth = researcher.get("research_depth", 1)
-        sources = len(researcher.get("research_results", {}))
-        print(f"  - {researcher.get('subtopic', 'Unknown')}: {sources} sources, depth {depth}")
-
-    return {
-        "messages": [],  # No user-facing message
-        "sub_researchers": [r for r in sub_researchers],
-        "subtopics": broad_queries,  # Store broad queries as subtopics
-    }
-
-
-
 async def verify_cross_references(state: dict, config: RunnableConfig) -> dict:
     """
     Verify claims across multiple sources and identify conflicts.
@@ -647,60 +549,63 @@ async def verify_cross_references(state: dict, config: RunnableConfig) -> dict:
 
 async def generate_outline(state: dict) -> dict:
     """
-    Generate a structured outline for the report based on research
-    Maps subtopics to sections with specific focus areas
+    Generate a structured outline for the report based on the question.
+    Creates sections that will each be researched by a dedicated subresearcher.
     """
 
     topic = state.get("topic", "")
-    sub_researchers = state.get("sub_researchers", [])
     revision_count = state.get("revision_count", 0)
 
     print(f"generate_outline: creating outline for topic='{topic[:50]}...' (revision {revision_count})")
-
-    # Build research overview
-    research_overview = f"Topic: {topic}\n\nSubtopics researched:\n"
-    for researcher in sub_researchers:
-        subtopic = researcher.get("subtopic", "")
-        sources = len(researcher.get("research_results", {}))
-        research_overview += f"- {subtopic} ({sources} sources)\n"
 
     outline_prompt = f"""
     You are a report outline specialist. Create a structured outline that DIRECTLY ANSWERS the main research question.
 
     MAIN RESEARCH QUESTION: {topic}
 
-    {research_overview}
+    CRITICAL: First, determine what TYPE of question this is, then organize sections accordingly:
 
-    CRITICAL: Organize sections by THEMES and ANSWERS, not by subtopics.
-    - If the same entity (person, song, product, etc.) appears in multiple subtopics' research, it should be discussed TOGETHER, not separately
-    - Synthesize findings across ALL subtopics to identify the KEY ANSWERS to the main question
-    - Each section should pull relevant information from ANY subtopic that has relevant data
+    **TYPE A - ENTITY-FOCUSED** (listing/comparing specific items):
+    Examples: "Best mobile games 2024", "Top K-pop songs", "MMORPG recommendations", "Leading AI companies"
+    → Create ONE SECTION PER ENTITY (game, song, company, person, product)
+    → Section titles = Entity names discovered in research
+    → Each section deep-dives into that specific entity with all available details
 
-    Example: If researching "most popular K-pop songs 2025":
-    - BAD: Section per subtopic (Charts section, Streaming section, Social Media section)
-    - GOOD: Section per answer (Top Songs section listing actual songs with combined evidence from charts + streaming + social)
+    **TYPE B - THEMATIC/ANALYTICAL** (explaining concepts, comparing philosophies, analyzing impacts):
+    Examples: "Investment philosophies of Buffett vs Munger", "Impact of AI on labor", "HGT in eukaryotes"
+    → Create sections by KEY THEMES/ASPECTS that answer the question
+    → Section titles = Themes/dimensions (e.g., "Risk Management", "Portfolio Construction", "Decision Process")
+    → Synthesize findings across subtopics for each theme
 
-    Required structure:
-    1. Executive Summary - Directly answer the main question with specific names/titles/rankings
-    2. Main sections (2-4 sections) organized by THEMES that answer the question:
-       - Each section should synthesize findings from ALL relevant subtopics
-       - Focus on WHAT the answer is, not WHERE the data came from
-       - Include specific names, titles, rankings prominently
-    3. Supporting Analysis - Context, methodology, factors behind the findings
-    4. Conclusion - Concise final answer to the main research question
+    **TYPE C - MARKET/TECHNICAL ANALYSIS** (sizing markets, evaluating technologies, comparing methods):
+    Examples: "Elderly consumption Japan 2020-2050", "Scaling quantum computing", "SRAM stability methods"
+    → Structure by ANALYTICAL COMPONENTS
+    → Section titles = Analysis dimensions (e.g., "Market Size", "Technology Roadmap", "Implementation")
 
-    For each section, specify:
-    - Section title (focused on answering the main question)
-    - Key questions to address (what specific answers should this section provide?)
-    - Which subtopics have relevant data (for reference, but section should synthesize across all)
+    **TYPE D - COMPREHENSIVE RESEARCH** (multi-faceted exploration of complex topics):
+    Examples: "AI in K-12 education", "Gut microbiota and cancer", "Bird migration navigation"
+    → Organize by LOGICAL FLOW (background → mechanisms → applications → implications)
+    → Build from foundational concepts to specific findings
 
-    Return as a JSON object with this structure:
+    STRUCTURE (adapt to type):
+    1. Executive Summary - Key findings/direct answer
+    2. Main sections (2-5):
+       - TYPE A: One per discovered entity
+       - TYPE B/C/D: One per theme/aspect/component
+    3. Conclusion - Synthesis and implications
+
+    For each section:
+    - Title: Entity name OR theme/aspect
+    - Subtopics: Which research contains relevant data
+    - Key questions: What this section should answer
+
+    Return JSON:
     {{
       "sections": [
         {{
           "title": "Section Title",
           "subtopics": ["subtopic1", "subtopic2"],
-          "key_questions": ["question1", "question2", "question3"]
+          "key_questions": ["question1", "question2"]
         }}
       ]
     }}
@@ -720,23 +625,21 @@ async def generate_outline(state: dict) -> dict:
         if json_match:
             outline = json.loads(json_match.group())
         else:
-            # Fallback: simple outline based on subtopics
+            # Fallback: create generic outline
             outline = {
                 "sections": [
-                    {"title": "Introduction", "subtopics": [], "key_questions": []},
-                    *[{"title": r.get("subtopic", ""), "subtopics": [r.get("subtopic", "")], "key_questions": []}
-                      for r in sub_researchers],
-                    {"title": "Conclusion", "subtopics": [], "key_questions": []}
+                    {"title": "Executive Summary", "subtopics": [], "key_questions": ["What are the key findings?"]},
+                    {"title": "Main Analysis", "subtopics": [], "key_questions": ["What are the main points?"]},
+                    {"title": "Conclusion", "subtopics": [], "key_questions": ["What are the implications?"]}
                 ]
             }
     except Exception as e:
         print(f"generate_outline: error parsing JSON, using fallback: {e}")
         outline = {
             "sections": [
-                {"title": "Introduction", "subtopics": [], "key_questions": []},
-                *[{"title": r.get("subtopic", ""), "subtopics": [r.get("subtopic", "")], "key_questions": []}
-                  for r in sub_researchers],
-                {"title": "Conclusion", "subtopics": [], "key_questions": []}
+                {"title": "Executive Summary", "subtopics": [], "key_questions": ["What are the key findings?"]},
+                {"title": "Main Analysis", "subtopics": [], "key_questions": ["What are the main points?"]},
+                {"title": "Conclusion", "subtopics": [], "key_questions": ["What are the implications?"]}
             ]
         }
 
@@ -752,21 +655,30 @@ async def generate_outline(state: dict) -> dict:
     }
 
 
-async def search_for_section_sources(section_title: str, topic: str, num_results: int = 3) -> list[dict]:
+async def search_for_section_sources(section_title: str, topic: str, search_api: str = "tavily", num_results: int = 3) -> list[dict]:
     """
     Perform a web search to find additional sources for a section.
     Used when existing research doesn't provide enough sources.
+    Respects the configured search API (tavily or serper).
     """
     search_query = f"{topic} {section_title}"
     print(f"    Searching for additional sources: '{search_query[:50]}...'")
 
     try:
         loop = asyncio.get_event_loop()
-        search_results = await loop.run_in_executor(
-            None,
-            lambda: tavily_client.search(query=search_query, max_results=num_results)
-        )
-        return search_results.get("results", [])
+        if search_api == "serper":
+            search_results = await loop.run_in_executor(
+                None,
+                lambda: serper_client.search(query=search_query, max_results=num_results)
+            )
+            # SerperClient returns Tavily-compatible format
+            return search_results.get("results", [])
+        else:
+            search_results = await loop.run_in_executor(
+                None,
+                lambda: tavily_client.search(query=search_query, max_results=num_results)
+            )
+            return search_results.get("results", [])
     except Exception as e:
         print(f"    Search failed: {e}")
         return []
@@ -1069,30 +981,105 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
     }
 
 
+async def research_sections(state: dict, config: RunnableConfig) -> dict:
+    """
+    Research each section from the outline with dedicated subresearchers.
+    Flow: outline sections → 1 subresearcher per section → research results
+    """
+    agent_config = get_config_from_configurable(config.get("configurable", {}))
+
+    topic = state.get("topic", "")
+    outline = state.get("report_outline", {})
+    sections = outline.get("sections", [])
+
+    print(f"research_sections: researching {len(sections)} sections")
+
+    # Create 1 subresearcher per section
+    async def process_section(idx: int, section: dict):
+        """Process a single section through subresearcher"""
+        section_title = section.get("title", "")
+        section_subtopics = section.get("subtopics", [])
+        section_questions = section.get("key_questions", [])
+
+        # Build TARGETED research query from section title + subtopics + key questions
+        # This focuses the subresearcher on specific aspects
+        research_query = f"{topic} {section_title}"
+
+        # Add subtopics to make research more specific
+        if section_subtopics:
+            subtopics_str = " ".join(section_subtopics[:3])  # Use first 3 subtopics
+            research_query += f" {subtopics_str}"
+
+        # Add key questions for additional context
+        if section_questions:
+            research_query += " " + " ".join(section_questions[:2])
+
+        print(f"  Researching section {idx+1}: {section_title} (subtopics: {section_subtopics[:3]})")
+
+        subgraph_state = {
+            "subtopic_id": idx,
+            "subtopic": research_query,
+            "main_topic": topic,
+            "other_subtopics": [s.get("title", "") for s in sections],
+            "research_results": {},
+            "research_depth": 1,
+            "source_credibilities": {},
+            "max_search_results": agent_config.max_search_results,
+            "max_research_depth": agent_config.max_research_depth,
+            "search_api": agent_config.search_api
+        }
+
+        result = await subresearcher_graph.ainvoke(subgraph_state)
+
+        return {
+            "subtopic_id": idx,
+            "subtopic": section_title,  # Use section title as subtopic key
+            "research_results": result.get("research_results", {}),
+            "source_credibilities": result.get("source_credibilities", {}),
+            "research_depth": result.get("research_depth", 1)
+        }
+
+    tasks = [process_section(idx, section) for idx, section in enumerate(sections)]
+    sub_researchers = await asyncio.gather(*tasks)
+
+    print(f"research_sections: completed {len(sub_researchers)} subresearchers")
+    for researcher in sub_researchers:
+        sources = len(researcher.get("research_results", {}))
+        print(f"  - {researcher.get('subtopic', 'Unknown')}: {sources} sources")
+
+    # Update outline sections with subtopic keys
+    for idx, section in enumerate(sections):
+        section["subtopics"] = [sub_researchers[idx].get("subtopic", "")]
+
+    return {
+        "sub_researchers": sub_researchers,
+        "report_outline": outline,  # Return updated outline with subtopics
+        "subtopics": [r.get("subtopic", "") for r in sub_researchers]
+    }
+
+
 async def research_outline_and_write(state: dict, config: RunnableConfig) -> dict:
     """
-    Merged node: Perform research, verification, outline, and writing.
-    Combines generate_subtopics, verify_cross_references, generate_outline, and write_sections_with_citations.
+    Merged node: Generate outline, research sections, and write.
+    Flow: outline → research each section → write sections
     """
     print("research_outline_and_write: Starting combined research and writing process")
-    
-    # 1. Generate Subtopics & Research
-    subtopics_result = await generate_subtopics(state, config)
-    state = {**state, **subtopics_result}
-    
-    # Verify Cross References
-    verify_result = await verify_cross_references(state, config)
-    state = {**state, **verify_result}
-    
-    # Generate Outline
+
+    # 1. Generate Outline (creates sections based on question)
+    print("research_outline_and_write: Step 1 - Generating outline")
     outline_result = await generate_outline(state)
     state = {**state, **outline_result}
-    
-    # Write Sections
+
+    # 2. Research Sections (1 subresearcher per outline section)
+    print("research_outline_and_write: Step 2 - Researching sections")
+    research_result = await research_sections(state, config)
+    state = {**state, **research_result}
+
+    # 3. Write Sections
+    print("research_outline_and_write: Step 3 - Writing sections")
     write_result = await write_sections_with_citations(state, config)
 
     # SEQUENTIAL MESSAGES FIX: Only return the final report message for clean LangSmith chat
-    # Intermediate messages (subtopics alert, etc.) are skipped to avoid multiple simultaneous messages
     final_message = None
     if "messages" in write_result and write_result["messages"]:
         final_message = write_result["messages"][-1]  # Take only the last message (full report)
@@ -1100,9 +1087,8 @@ async def research_outline_and_write(state: dict, config: RunnableConfig) -> dic
     print("research_outline_and_write: Completed combined process")
 
     return {
-        **subtopics_result,
-        **verify_result,
         **outline_result,
+        **research_result,
         **write_result,
         "messages": [final_message] if final_message else []  # Only ONE message
     }

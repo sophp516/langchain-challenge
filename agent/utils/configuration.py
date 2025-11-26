@@ -65,7 +65,7 @@ class AgentConfig(BaseModel):
 
     # Search API settings
     search_api: Literal["tavily", "serper"] = Field(
-        default="tavily",
+        default="serper",
         description="Which search API to use for research"
     )
 

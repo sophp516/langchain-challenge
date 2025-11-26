@@ -50,13 +50,10 @@ async def initial_broad_search(state: SubResearcherGraphState) -> dict:
             loop = asyncio.get_event_loop()
             search_results = await loop.run_in_executor(
                 None,
-                lambda: serper_client.search(query=broad_query, num_results=max_results)
+                lambda: serper_client.search(query=broad_query, max_results=max_results)
             )
-            results = search_results.get("organic", [])[:max_results]
-            search_results_list = [
-                {"url": r.get("link", ""), "title": r.get("title", ""), "content": r.get("snippet", "")}
-                for r in results
-            ]
+            # SerperClient already returns Tavily-compatible format {"results": [...]}
+            search_results_list = search_results.get("results", [])[:max_results]
         else:  # tavily (default)
             loop = asyncio.get_event_loop()
             search_results = await loop.run_in_executor(
@@ -183,13 +180,10 @@ async def deep_research_entities(state: SubResearcherGraphState) -> dict:
                 loop = asyncio.get_event_loop()
                 results = await loop.run_in_executor(
                     None,
-                    lambda: serper_client.search(query=academic_query, num_results=max_results)
+                    lambda: serper_client.search(query=academic_query, max_results=max_results)
                 )
-                results = results.get("organic", [])[:max_results]
-                return [
-                    {"url": r.get("link", ""), "title": r.get("title", ""), "content": r.get("snippet", "")}
-                    for r in results
-                ]
+                # SerperClient returns {"results": [...]} in Tavily-compatible format
+                return results.get("results", [])[:max_results]
             else:
                 loop = asyncio.get_event_loop()
                 results = await loop.run_in_executor(
@@ -209,13 +203,10 @@ async def deep_research_entities(state: SubResearcherGraphState) -> dict:
                 loop = asyncio.get_event_loop()
                 results = await loop.run_in_executor(
                     None,
-                    lambda: serper_client.search(query=news_query, num_results=max_results)
+                    lambda: serper_client.search(query=news_query, max_results=max_results)
                 )
-                results = results.get("organic", [])[:max_results]
-                return [
-                    {"url": r.get("link", ""), "title": r.get("title", ""), "content": r.get("snippet", "")}
-                    for r in results
-                ]
+                # SerperClient returns {"results": [...]} in Tavily-compatible format
+                return results.get("results", [])[:max_results]
             else:
                 loop = asyncio.get_event_loop()
                 results = await loop.run_in_executor(
@@ -235,13 +226,10 @@ async def deep_research_entities(state: SubResearcherGraphState) -> dict:
                 loop = asyncio.get_event_loop()
                 results = await loop.run_in_executor(
                     None,
-                    lambda: serper_client.search(query=general_query, num_results=max_results)
+                    lambda: serper_client.search(query=general_query, max_results=max_results)
                 )
-                results = results.get("organic", [])[:max_results]
-                return [
-                    {"url": r.get("link", ""), "title": r.get("title", ""), "content": r.get("snippet", "")}
-                    for r in results
-                ]
+                # SerperClient returns {"results": [...]} in Tavily-compatible format
+                return results.get("results", [])[:max_results]
             else:
                 loop = asyncio.get_event_loop()
                 results = await loop.run_in_executor(
@@ -281,9 +269,21 @@ async def deep_research_entities(state: SubResearcherGraphState) -> dict:
         print(f"[Subresearcher]   - {entity}: found {len(entity_results)} sources (academic={len(academic_results)}, news={len(news_results)}, social={len(social_results)})")
         return entity_results
 
-    # Research all entities in parallel (each with their own parallel searches)
-    tasks = [research_entity_parallel(entity) for entity in entities]
-    all_entity_results = await asyncio.gather(*tasks)
+    # Research all entities with rate limiting for Serper API
+    # Serper has stricter rate limits, so we add delays between entities
+    all_entity_results = []
+    if search_api == "serper":
+        # Sequential with delay to avoid 429 errors
+        for entity in entities:
+            result = await research_entity_parallel(entity)
+            all_entity_results.append(result)
+            # Small delay between entities to respect rate limits
+            if len(entities) > 1:
+                await asyncio.sleep(1)  # 1 second delay between entities
+    else:
+        # Tavily can handle parallel requests better
+        tasks = [research_entity_parallel(entity) for entity in entities]
+        all_entity_results = await asyncio.gather(*tasks)
 
     # Combine all results (initial + entity research)
     combined_results = {**initial_results}
