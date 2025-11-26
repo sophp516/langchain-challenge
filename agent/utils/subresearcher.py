@@ -39,10 +39,11 @@ async def initial_broad_search(state: SubResearcherGraphState) -> dict:
     This discovers what entities exist.
     """
     broad_query = state.get("subtopic", "")
+    subtopic_id = state.get("subtopic_id", 0)
     search_api = state.get("search_api", "tavily")
     max_results = state.get("max_search_results", 3)
 
-    print(f"[Subresearcher] Initial broad search: {broad_query[:60]}...")
+    print(f"[Subresearcher #{subtopic_id}] [DEPTH 1: Initial Search] Query: {broad_query[:60]}...")
 
     # Single search on the broad query
     try:
@@ -77,7 +78,7 @@ async def initial_broad_search(state: SubResearcherGraphState) -> dict:
             source_key = f"{source_title} ({source_url})"
             initial_results[source_key] = source_content
 
-    print(f"[Subresearcher] Found {len(initial_results)} sources from initial search")
+    print(f"[Subresearcher #{subtopic_id}] [DEPTH 1: Initial Search] Found {len(initial_results)} sources")
 
     return {
         "research_results": initial_results,
@@ -87,14 +88,23 @@ async def initial_broad_search(state: SubResearcherGraphState) -> dict:
 
 async def extract_entities(state: SubResearcherGraphState) -> dict:
     """
-    Step 2: Extract entities (games, products, people, etc.) from initial results.
-    These entities will be researched in depth.
+    Step 2: ADAPTIVE ENTITY/TOPIC EXTRACTION
+
+    Analyzes initial research to:
+    1. Identify key entities/topics that need deeper investigation
+    2. Filter out minor/irrelevant items
+    3. Prioritize what actually matters for comprehensive coverage
+
+    Works for all topic types:
+    - Type A: Extract important entities (games, songs, products, etc.)
+    - Type B/C/D: Extract key themes/aspects that need more depth
     """
     research_results = state.get("research_results", {})
     main_topic = state.get("main_topic", "")
+    subtopic = state.get("subtopic", "")
     max_depth = state.get("max_research_depth", 1)
 
-    # If max_depth is 1, skip entity extraction (no deep dive)
+    # If max_depth is 1, skip deeper research
     if max_depth <= 1:
         print(f"[Subresearcher] max_depth={max_depth}, skipping entity extraction")
         return {"entities": []}
@@ -109,48 +119,71 @@ async def extract_entities(state: SubResearcherGraphState) -> dict:
         print(f"[Subresearcher] No content to extract entities from")
         return {"entities": []}
 
-    print(f"[Subresearcher] Extracting entities from initial results...")
+    subtopic_id = state.get("subtopic_id", 0)
+    print(f"[Subresearcher #{subtopic_id}] [DEPTH 1→2: Adaptive Analysis] Analyzing what needs deeper research...")
 
-    # Use LLM to extract entities
-    EntitiesOutput = create_model(
-        'EntitiesOutput',
-        entities=(list[str], ...)
+    # Use LLM to intelligently extract IMPORTANT topics/entities only
+    AdaptiveExtractionOutput = create_model(
+        'AdaptiveExtractionOutput',
+        should_go_deeper=(bool, ...),
+        reasoning=(str, ...),
+        important_topics=(list[str], ...)
     )
 
-    entity_llm = llm.with_structured_output(EntitiesOutput)
+    adaptive_llm = llm.with_structured_output(AdaptiveExtractionOutput)
 
-    entity_prompt = f"""
-    Extract specific entities (names, titles, products) from the research results.
+    adaptive_prompt = f"""
+    Analyze the research results and decide if deeper investigation is needed.
 
+    Query: {subtopic}
     Main Topic: {main_topic}
 
-    Research Results:
-    {combined_content[:2000]}
+    Initial Research Results:
+    {combined_content[:2500]}
 
-    Extract ALL entities mentioned:
-    - For games: game titles (e.g., "Ashes of Creation", "Throne and Liberty")
-    - For songs: song titles and artists (e.g., "APT by Rosé")
-    - For products: product names (e.g., "iPhone 15", "Galaxy S24")
-    - For people: person names (e.g., "Sam Altman")
-    - For companies: company names (e.g., "OpenAI", "Google")
+    **YOUR TASK:**
+    1. Determine if current research is SUFFICIENT to comprehensively answer the query
+    2. If NOT sufficient, identify 3-5 IMPORTANT topics/entities that need deeper research
+    3. Filter out minor/irrelevant items - only select topics that significantly impact the answer
 
-    Return ONLY the specific entity names, one per line.
-    Extract up to 5 most relevant entities.
+    **DECISION CRITERIA:**
+    - Go deeper IF: Results mention multiple important entities/themes but lack detail on each
+    - Go deeper IF: Critical aspects are mentioned but not explained
+    - STOP IF: Current results already provide comprehensive coverage
+    - STOP IF: Only generic/shallow information exists and going deeper won't help
+
+    **EXTRACTION GUIDELINES:**
+    - Type A (Entity lists like "best games 2024"): Extract specific entities (game names, product names, people)
+    - Type B/C/D (Thematic/analytical): Extract key themes/aspects (e.g., "training methodology", "risk factors")
+    - Focus on topics that matter for comprehensive coverage
+    - Skip trivial/redundant topics
+
+    Return:
+    - should_go_deeper: true/false
+    - reasoning: Why you made this decision (one sentence)
+    - important_topics: List of 3-5 topics to research deeper (empty if should_go_deeper=false)
     """
 
     try:
-        response = await entity_llm.ainvoke([
-            SystemMessage(content="Extract specific entity names from research results. Return only names."),
-            HumanMessage(content=entity_prompt)
+        response = await adaptive_llm.ainvoke([
+            SystemMessage(content="You are a research strategist who decides what needs deeper investigation."),
+            HumanMessage(content=adaptive_prompt)
         ])
 
-        entities = response.entities[:5]  # Limit to 5 entities
-        print(f"[Subresearcher] Extracted {len(entities)} entities: {entities}")
+        should_go_deeper = response.should_go_deeper
+        reasoning = response.reasoning
+        important_topics = response.important_topics[:5]  # Max 5 topics
 
-        return {"entities": entities}
+        print(f"[Subresearcher] Decision: {'GO DEEPER' if should_go_deeper else 'SUFFICIENT'}")
+        print(f"[Subresearcher] Reasoning: {reasoning}")
+        if should_go_deeper:
+            print(f"[Subresearcher] Topics to research: {important_topics}")
+
+        return {"entities": important_topics if should_go_deeper else []}
 
     except Exception as e:
-        print(f"[Subresearcher] Entity extraction failed: {e}")
+        print(f"[Subresearcher] Adaptive extraction failed: {e}")
+        # Fallback to simple entity extraction
         return {"entities": []}
 
 

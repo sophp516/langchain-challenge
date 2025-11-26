@@ -70,7 +70,7 @@ class AgentConfig(BaseModel):
     )
 
     max_search_results: int = Field(
-        default=3,  # COST OPTIMIZATION: Reduced from 5 (15-20% savings)
+        default=5,
         ge=1,
         le=20,
         description="Maximum number of search results per query"
@@ -82,13 +82,6 @@ class AgentConfig(BaseModel):
         ge=1,
         le=5,
         description="Maximum depth for multi-layer research (1-5)"
-    )
-
-    num_subtopics: int = Field(
-        default=3,
-        ge=2,
-        le=10,
-        description="Number of subtopics to generate (2-10)"
     )
 
     max_clarification_rounds: int = Field(
