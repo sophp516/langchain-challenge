@@ -436,7 +436,7 @@ async def generate_clarification_question(state: dict, config: RunnableConfig) -
     - Missing constraints that are user choices (e.g., "What time period?" if not mentioned)
     - Ambiguities that require user input (e.g., "Do you mean X or Y?" when both are possible)
 
-    If the topic has a clear subject and at least one constraint (time, category, scope, etc.), respond with "ENOUGH_CONTEXT"
+    If the topic has a clear subject, respond with "ENOUGH_CONTEXT"
 
     Examples:
     - Topic "most popular X of 2025" + user said "criteria A and criteria B" → ENOUGH_CONTEXT (agent can research what metrics are used)
@@ -509,12 +509,16 @@ def collect_user_response(state: dict) -> dict:
 
 
 async def generate_subtopics(state: dict, config: RunnableConfig) -> dict:
-    """Generate subtopics and create subresearchers using the subresearcher subgraph with multi-layer research"""
+    """
+    Generate DISCOVERY research queries to find actual entities that answer the question.
+    This is Phase 1: Broad research to discover what entities (games, products, people) exist.
+    Phase 2 (outline generation) will organize these entities into sections.
+    """
 
     agent_config = get_config_from_configurable(config.get("configurable", {}))
 
     topic = state.get("topic", "")
-    print(f"generate_subtopics: starting for topic='{topic[:50]}...'")
+    print(f"generate_subtopics: starting discovery research for topic='{topic[:50]}...'")
 
     # Create structured output model for subtopics
     SubtopicsOutput = create_model(
@@ -525,83 +529,49 @@ async def generate_subtopics(state: dict, config: RunnableConfig) -> dict:
     structured_llm = llm_quality.with_structured_output(SubtopicsOutput)
 
     prompt = f"""
-    You are a research strategist that generates optimal subtopics for comprehensive research.
-    Generate exactly {agent_config.num_subtopics} subtopics for the given topic.
+    Generate 2-3 BROAD search queries that are variations/rephrases of the main topic.
+    These will do initial research to discover entities. Keep them broad and search-friendly.
 
     Topic: {topic}
 
-    CRITICAL REQUIREMENT: Every subtopic MUST directly answer or contribute to answering the main question/topic. 
-    Do NOT include tangential topics, background information, or general context that doesn't directly address the core question.
+    Generate queries that:
+    - Rephrase the main topic in different ways
+    - Use synonyms and alternative search terms
+    - Include keywords like "top", "best", "list", "popular", "upcoming"
 
-    FIRST, identify the core question being asked:
-    - If topic asks "most popular X" or "best X" → Focus on ranking, metrics, comparisons, specific candidates
-    - If topic asks "what is X" or "how does X work" → Focus on explanation, components, mechanisms
-    - If topic asks "effects of X" or "impact of X" → Focus on specific effects, outcomes, consequences
-    - If topic asks "X in [time period]" → Focus on what happened/occurred in that specific period
+    Example for "mobile games":
+    - "Best mobile games 2024"
+    - "Top mobile gaming apps rankings"
+    - "Most popular mobile games list"
 
-    THEN, analyze the topic type and choose the best research approach:
+    Example for "MMORPG 2026":
+    - "Top MMORPGs releasing 2026"
+    - "Best upcoming MMORPG launches"
+    - "Most anticipated MMORPG games"
 
-    **APPROACH A - Entity-Focused** (use when topic is about identifying/comparing specific items):
-    Best for: "Most popular X", "Top X", "Games releasing in 2026", "Best X"
-    Strategy: Research specific entities/candidates individually, then compare and rank
-    Example for "Most popular X of 2024":
-    - "Top X items on relevant charts/rankings in 2024 - performance metrics"
-    - "X items with highest engagement metrics (views, sales, downloads) in 2024"
-    - "X items with most social media engagement and viral moments in 2024"
-    - "Comparison of top X items across different metrics in 2024"
-    
-    Example for "MMORPGs releasing in 2026":
-    - "Ashes of Creation 2026 release - features, development status, community reception"
-    - "Throne and Liberty 2026 - gameplay systems, publisher, launch expectations"
-    - "Blue Protocol Western release 2026 - localization, content differences, hype"
-    - "Comparison of business models across 2026 MMORPG releases"
-
-    **APPROACH B - Thematic/Analytical** (use when topic needs conceptual analysis):
-    Best for: "Effects of climate change", "Best practices for X", "How does Y work"
-    Strategy: Break down by themes, causes, effects, or analytical angles - ALL must directly answer the question
-    Example for "Impact of AI on healthcare":
-    - "AI diagnostic tools and accuracy improvements in medical imaging"
-    - "AI-powered drug discovery and development timelines"
-    - "Ethical concerns and regulatory challenges of AI in healthcare"
-
-    **APPROACH C - Hybrid** (combine both when appropriate):
-    Best for: Complex topics that benefit from both specific examples AND thematic analysis
-    Example for "Electric vehicles market 2025":
-    - "Tesla Model 3 and Model Y - 2025 updates and market position"
-    - "BYD and Chinese EV manufacturers expanding globally in 2025"
-    - "Charging infrastructure developments across major markets"
-    - "Price trends and affordability of EVs in 2025"
-
-    STRICT RULES:
-    1. Each subtopic MUST directly answer the main question - no tangential topics
-    2. For "most popular/best X" questions: Focus on ranking, metrics, comparisons, NOT general background
-    3. Subtopics should be specific enough to return good search results
-    4. Avoid generic/vague subtopics like "Overview", "General trends", or "Background"
-    5. Do NOT include subtopics about "cultural impact", "fan engagement", "visual trends" unless they directly answer the main question
-    6. For entity-focused topics, try to identify SPECIFIC entities (names, titles, companies) when possible
-    7. Ensure subtopics are distinct and don't overlap significantly
-
-    Generate {agent_config.num_subtopics} subtopics that will produce the most comprehensive and useful research DIRECTLY answering the topic.
+    Generate 2-3 broad queries for: "{topic}"
     """
 
     llm_response = await structured_llm.ainvoke([
-        SystemMessage(content=f"You are a research strategist that generates exactly {agent_config.num_subtopics} optimal subtopics. CRITICAL: Every subtopic must directly answer the main question - do NOT include tangential topics, background information, or general context. For 'most popular/best/top X' questions, focus on ranking, metrics, and comparisons, NOT tangential topics unless they directly determine the answer."),
+        SystemMessage(content="Generate 2-3 broad search queries that are variations of the main topic. Keep them simple and search-friendly."),
         HumanMessage(content=prompt)
     ])
 
-    subtopics = llm_response.subtopics
-    print(f"generate_subtopics: generated {len(subtopics)} subtopics")
+    broad_queries = llm_response.subtopics[:3]  # Limit to 3
+    print(f"generate_subtopics: generated {len(broad_queries)} broad queries")
+    for q in broad_queries:
+        print(f"  - {q}")
 
-    # Generate subresearchers for each subtopic in parallel
-    async def process_subtopic(idx: int, subtopic: str, main_topic: str):
-        """Process a single subtopic through the multi-layer subresearcher subgraph"""
+    # Pass broad queries to subresearcher (which will do iterative deepening internally)
+    async def process_broad_query(idx: int, query: str, main_topic: str):
+        """Process a single broad query through subresearcher (which does iterative deepening)"""
         subgraph_state = {
             "subtopic_id": idx,
-            "subtopic": subtopic,
-            "main_topic": main_topic,  # Pass main topic for search context
-            "other_subtopics": subtopics,
+            "subtopic": query,  # Broad query
+            "main_topic": main_topic,
+            "other_subtopics": broad_queries,
             "research_results": {},
-            "research_depth": 1,  # Start at layer 1
+            "research_depth": 1,
             "source_credibilities": {},
             "max_search_results": agent_config.max_search_results,
             "max_research_depth": agent_config.max_research_depth,
@@ -612,32 +582,26 @@ async def generate_subtopics(state: dict, config: RunnableConfig) -> dict:
 
         return {
             "subtopic_id": idx,
-            "subtopic": subtopic,
+            "subtopic": query,
             "research_results": result.get("research_results", {}),
             "source_credibilities": result.get("source_credibilities", {}),
             "research_depth": result.get("research_depth", 1)
         }
 
-    tasks = [process_subtopic(idx, subtopic, topic) for idx, subtopic in enumerate(subtopics)]
-    print(f"generate_subtopics: processing {len(tasks)} subtopics in parallel with multi-layer research")
+    tasks = [process_broad_query(idx, query, topic) for idx, query in enumerate(broad_queries)]
+    print(f"generate_subtopics: sending {len(tasks)} broad queries to subresearcher for iterative deepening")
     sub_researchers = await asyncio.gather(*tasks)
-    print(f"generate_subtopics: completed processing {len(sub_researchers)} sub_researchers")
+    print(f"generate_subtopics: completed {len(sub_researchers)} subresearchers")
 
     for researcher in sub_researchers:
         depth = researcher.get("research_depth", 1)
         sources = len(researcher.get("research_results", {}))
         print(f"  - {researcher.get('subtopic', 'Unknown')}: {sources} sources, depth {depth}")
 
-    subtopic_list = "\n".join(f"{i + 1}. {st}" for i, st in enumerate(subtopics))
-
-    subtopic_alert_message = f"""I've come up with {len(subtopics)} research areas on this topic:
-
-{subtopic_list}"""
-
     return {
-        "messages": [AIMessage(content=subtopic_alert_message)],
+        "messages": [],  # No user-facing message
         "sub_researchers": [r for r in sub_researchers],
-        "subtopics": subtopics,
+        "subtopics": broad_queries,  # Store broad queries as subtopics
     }
 
 
@@ -1037,13 +1001,12 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
             "credibilities": researcher.get("source_credibilities", {})
         }
 
-    # DEBUG: Log available research keys
     print(f"write_sections_with_citations: Available research keys:")
     for key in research_by_subtopic.keys():
         num_sources = len(research_by_subtopic[key]["results"])
         print(f"  '{key}': {num_sources} sources")
 
-    # SEQUENTIAL WRITING: Write sections one at a time so each has context from previous sections
+    # Write sections one at a time so each has context from previous sections
     print(f"write_sections_with_citations: writing {len(sections)} sections SEQUENTIALLY for context flow")
     written_sections = []
 
