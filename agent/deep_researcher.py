@@ -25,8 +25,7 @@ def create_agent(use_checkpointer=False):
 
     # Intent Routing Nodes
     workflow.add_node("check_user_intent", check_user_intent)
-    workflow.add_node("call_report_tools", call_report_tools)
-    workflow.add_node("execute_and_format_tools", execute_and_format_tools)  # MERGED: execute_tools + format_tool_response
+    workflow.add_node("execute_and_format_tools", execute_and_format_tools)  # OPTIMIZED: creates tool call + executes + formats in one node
 
     # Topic Inquiry Nodes
     workflow.add_node("check_initial_context", check_initial_context)
@@ -49,25 +48,17 @@ def create_agent(use_checkpointer=False):
     # Entry Point - Intent Check
     workflow.set_entry_point("check_user_intent")
 
-    # Intent Routing
+    # Intent Routing - OPTIMIZED: skip call_report_tools, go directly to execute_and_format_tools
     workflow.add_conditional_edges(
         "check_user_intent",
         route_after_intent_check,
         {
             "research": "check_initial_context",
-            "tools": "call_report_tools"
+            "tools": "execute_and_format_tools"  # Direct route (no intermediate node)
         }
     )
 
-    # Tool Flow: call_report_tools -> check for tool calls -> execute -> format -> END
-    workflow.add_conditional_edges(
-        "call_report_tools",
-        should_continue_tools,
-        {
-            "execute": "execute_and_format_tools",
-            "end": END
-        }
-    )
+    # Tool Flow: execute_and_format_tools does everything in one node, then END
     workflow.add_edge("execute_and_format_tools", END)
 
     # Topic Inquiry Flow

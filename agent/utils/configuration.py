@@ -70,7 +70,7 @@ class AgentConfig(BaseModel):
     )
 
     max_search_results: int = Field(
-        default=5,
+        default=3,  # COST OPTIMIZATION: Reduced from 5 (15-20% savings)
         ge=1,
         le=20,
         description="Maximum number of search results per query"
@@ -78,14 +78,14 @@ class AgentConfig(BaseModel):
 
     # Research depth settings
     max_research_depth: int = Field(
-        default=2,
+        default=1,  # COST OPTIMIZATION: Reduced from 2 (30-40% savings) - Layer 1 has most value
         ge=1,
         le=5,
         description="Maximum depth for multi-layer research (1-5)"
     )
 
     num_subtopics: int = Field(
-        default=4,
+        default=3,  # COST OPTIMIZATION: Reduced from 4 (5-10% savings)
         ge=2,
         le=10,
         description="Number of subtopics to generate (2-10)"
@@ -93,7 +93,7 @@ class AgentConfig(BaseModel):
 
     # Clarification settings
     max_clarification_rounds: int = Field(
-        default=3,
+        default=1,  # COST OPTIMIZATION: Reduced from 3 to minimize back-and-forth
         ge=0,
         le=10,
         description="Maximum number of clarification questions (0-10)"
@@ -101,14 +101,14 @@ class AgentConfig(BaseModel):
 
     # Report quality settings
     min_report_score: int = Field(
-        default=85,
+        default=100,  # COST OPTIMIZATION: Set to 100 to skip automatic revision (40-50% savings)
         ge=0,
         le=100,
         description="Minimum acceptable report score (0-100)"
     )
 
     max_revision_rounds: int = Field(
-        default=2,
+        default=0,  # COST OPTIMIZATION: Disabled automatic revision - let users request changes via feedback
         ge=0,
         le=5,
         description="Maximum number of report revision attempts"

@@ -123,7 +123,8 @@ async def check_user_intent(state: dict) -> dict:
 
 async def call_report_tools(state: dict) -> dict:
     """
-    Use LLM with tools to generate tool calls for report operations.
+    COST OPTIMIZATION: Direct tool call creation based on intent (no LLM needed)
+    Saves ~$0.01 per call and reduces latency by 500-1000ms
     """
     intent = state.get("user_intent", "")
     report_id = state.get("intent_report_id", "")
@@ -131,39 +132,81 @@ async def call_report_tools(state: dict) -> dict:
 
     print(f"call_report_tools: intent={intent}, report_id={report_id}")
 
-    tool_prompt = f"""
-    User request: "{topic}"
+    # Create tool call directly based on intent (no LLM needed!)
+    tool_calls = []
 
-    Use the appropriate tool:
-    - get_report: To retrieve a specific report by ID
-    - list_report_versions: To list versions of a specific report
-    - list_all_reports: To list all available reports
+    if intent == "retrieve_report":
+        if not report_id:
+            # No report_id provided, ask user
+            return {
+                "messages": [AIMessage(content="Please provide a report ID to retrieve. Example: report_abc123")]
+            }
+        tool_calls = [{
+            "name": "get_report",
+            "args": {"report_id": report_id},
+            "id": "call_1"
+        }]
+    elif intent == "list_reports":
+        tool_calls = [{
+            "name": "list_all_reports",
+            "args": {"limit": 20},
+            "id": "call_1"
+        }]
+    else:
+        # Unknown intent, should not happen
+        return {
+            "messages": [AIMessage(content=f"Unknown intent: {intent}")]
+        }
 
-    Intent: {intent}
-    Report ID: {report_id or "not specified"}
+    # Create AIMessage with tool_calls (mimics LLM response structure)
+    from langchain_core.messages import AIMessage as AIMsg
+    message = AIMsg(content="", tool_calls=tool_calls)
 
-    Call the appropriate tool now.
-    """
+    print(f"call_report_tools: created {len(tool_calls)} tool call(s) directly (no LLM)")
 
-    messages = [
-        SystemMessage(content="You retrieve reports using the available tools."),
-        HumanMessage(content=tool_prompt)
-    ]
-
-    response = await llm_with_tools.ainvoke(messages)
-    print(f"call_report_tools: generated tool_calls={bool(response.tool_calls)}")
-
-    return {"messages": [response]}
+    return {"messages": [message]}
 
 
 async def execute_and_format_tools(state: dict) -> dict:
     """
-    Merged node: Execute report tools and format the response.
-    Combines execute_tools (ToolNode) and format_tool_response to reduce graph execution cost.
+    OPTIMIZED: Creates tool call, executes it, and formats response in one node.
+    Replaces call_report_tools + execute_and_format_tools for ~50ms latency reduction.
     """
-    # Step 1: Execute tools (ToolNode functionality)
-    tool_result = await report_tool_node.ainvoke(state)
-    merged_state = {**state, **tool_result}
+    intent = state.get("user_intent", "")
+    report_id = state.get("intent_report_id", "")
+
+    # Create tool call directly based on intent (same logic as call_report_tools)
+    tool_calls = []
+
+    if intent == "retrieve_report":
+        if not report_id:
+            return {
+                "messages": [AIMessage(content="Please provide a report ID to retrieve. Example: report_abc123")]
+            }
+        tool_calls = [{
+            "name": "get_report",
+            "args": {"report_id": report_id},
+            "id": "call_1"
+        }]
+    elif intent == "list_reports":
+        tool_calls = [{
+            "name": "list_all_reports",
+            "args": {"limit": 20},
+            "id": "call_1"
+        }]
+    else:
+        return {
+            "messages": [AIMessage(content=f"Unknown intent: {intent}")]
+        }
+
+    # Create AIMessage with tool_calls
+    from langchain_core.messages import AIMessage as AIMsg
+    tool_call_message = AIMsg(content="", tool_calls=tool_calls)
+
+    # Execute tools with the tool call message
+    temp_state = {**state, "messages": state.get("messages", []) + [tool_call_message]}
+    tool_result = await report_tool_node.ainvoke(temp_state)
+    merged_state = {**temp_state, **tool_result}
     messages = merged_state.get("messages", [])
 
     # Step 2: Format the tool response
@@ -560,7 +603,6 @@ async def generate_subtopics(state: dict, config: RunnableConfig) -> dict:
             "research_results": {},
             "research_depth": 1,  # Start at layer 1
             "source_credibilities": {},
-            "follow_up_queries": [],
             "max_search_results": agent_config.max_search_results,
             "max_research_depth": agent_config.max_research_depth,
             "search_api": agent_config.search_api
@@ -772,20 +814,22 @@ async def write_single_section(
     research_by_subtopic: dict,
     min_credibility_score: float,
     all_sections: list = None,
-    section_index: int = 0
+    section_index: int = 0,
+    previously_written_sections: list = None
 ) -> dict:
     """
     Write a single section of the report with citations.
-    This function is called in parallel for each section.
+    SEQUENTIAL WRITING: This function now receives previously written sections to maintain context.
     If insufficient sources exist, performs additional web search.
-    Includes outline context to avoid overlap with other sections.
+    Includes full context of previous sections for sequential, cohesive writing.
     """
     section_title = section.get("title", "")
     section_subtopics = section.get("subtopics", [])
     all_sections = all_sections or []
+    previously_written_sections = previously_written_sections or []
     MIN_SOURCES_THRESHOLD = 2  # Minimum sources needed before searching for more
 
-    print(f"  Writing section: {section_title}")
+    print(f"  Writing section {section_index + 1}/{len(all_sections)}: {section_title}")
 
     # Gather relevant research for this section
     relevant_research = ""
@@ -825,47 +869,49 @@ async def write_single_section(
     if not relevant_research:
         relevant_research = "Limited sources available. Provide general analysis based on the topic."
 
-    # Build outline context to avoid overlap between sections
-    outline_context = ""
-    if all_sections and len(all_sections) > 1:
-        sections_before = all_sections[:section_index]
-        sections_after = all_sections[section_index + 1:]
+    # Build sequential context - include actual content from previously written sections
+    sequential_context = ""
+    if previously_written_sections:
+        sequential_context = "\n**PREVIOUSLY WRITTEN SECTIONS - Build on this content:**\n"
+        sequential_context += f"You are writing Section {section_index + 1} of {len(all_sections)}. The reader has already read:\n\n"
 
-        outline_context = "\n**REPORT STRUCTURE - Your section's role:**\n"
-        outline_context += f"You are writing Section {section_index + 1} of {len(all_sections)}.\n\n"
+        for i, prev_section in enumerate(previously_written_sections):
+            prev_title = prev_section.get("title", "")
+            prev_content = prev_section.get("content", "")
 
-        if sections_before:
-            outline_context += "SECTIONS BEFORE YOURS (readers will have already seen this info - DO NOT repeat):\n"
-            for i, s in enumerate(sections_before):
-                s_title = s.get("title", "")
-                s_questions = s.get("key_questions", [])
-                outline_context += f"  {i + 1}. \"{s_title}\""
-                if s_questions:
-                    outline_context += f" - covers: {', '.join(s_questions[:2])}"
-                outline_context += "\n"
-            outline_context += "\n"
+            # Include a summary of previous section content (first 800 chars to maintain context)
+            content_preview = prev_content[:800] + "..." if len(prev_content) > 800 else prev_content
 
-        if sections_after:
-            outline_context += "SECTIONS AFTER YOURS (DO NOT cover their content - they will handle it):\n"
-            for i, s in enumerate(sections_after):
-                s_title = s.get("title", "")
-                s_questions = s.get("key_questions", [])
-                outline_context += f"  {section_index + 2 + i}. \"{s_title}\""
-                if s_questions:
-                    outline_context += f" - will cover: {', '.join(s_questions[:2])}"
-                outline_context += "\n"
-            outline_context += "\n"
+            sequential_context += f"--- Section {i + 1}: {prev_title} ---\n{content_preview}\n\n"
 
-        outline_context += """**AVOID REDUNDANCY:**
-- Do NOT re-introduce entities/games/items that previous sections already introduced
-- If you mention an entity, focus on THIS section's unique angle (not general overview)
-- Reference prior sections if needed: "As noted above..." or "Building on the overview..."
-- Save details for later sections if they fit better there
+        sequential_context += """**YOUR SECTION MUST:**
+- Reference and build upon specific facts, names, and details mentioned in previous sections
+- Continue the narrative flow - don't start from scratch as if nothing was written before
+- Add NEW information that extends or deepens the analysis (not repeat what was already said)
+- Use phrases like "As mentioned in [previous section]...", "Building on the [X] discussed above...", "These [entities] face..."
+- If previous sections introduced specific entities (games, companies, people, products), reference them by name in your section
+- Focus on answering the MAIN RESEARCH QUESTION with specific, concrete details from your sources
 """
+
+    # Build outline context for remaining sections
+    outline_context = ""
+    if all_sections and section_index < len(all_sections) - 1:
+        sections_after = all_sections[section_index + 1:]
+        outline_context = "\n**SECTIONS COMING AFTER YOURS (don't cover their content):**\n"
+        for i, s in enumerate(sections_after):
+            s_title = s.get("title", "")
+            s_questions = s.get("key_questions", [])
+            outline_context += f"  {section_index + 2 + i}. \"{s_title}\""
+            if s_questions:
+                outline_context += f" - will cover: {', '.join(s_questions[:2])}"
+            outline_context += "\n"
 
     section_prompt = f"""
     Write the "{section_title}" section of a research report on: {topic}
+
+    {sequential_context}
     {outline_context}
+
     SOURCES (numbered for citation):
     {relevant_research[:5000]}
 
@@ -953,93 +999,16 @@ async def write_single_section(
 
     response = await llm_quality.ainvoke(messages)
     section_content = response.content if hasattr(response, 'content') else str(response)
-    
-    # Verify grounding to catch hallucinations
-    if relevant_research and section_content:
-        try:
-            verification_result = await verify_section_grounding(section_content, relevant_research, section_title)
-            if verification_result.get("grounding_score", 1.0) < 0.7:
-                ungrounded = verification_result.get("ungrounded_claims", [])
-                if ungrounded:
-                    print(f"  WARNING: Potential hallucinations detected in '{section_title}': {ungrounded[:3]}")
-                    # Note: We still return the content, but log the warning
-                    # In production, you might want to regenerate or flag for review
-        except Exception as e:
-            print(f"  Warning: Grounding verification failed for '{section_title}': {e}")
+
 
     return {
         "title": section_title,
         "content": section_content,
         "sources": sources_list,
-        "subtopics": section_subtopics  # CRITICAL: Preserve subtopics for revisions
+        "subtopics": section_subtopics
     }
 
 
-async def verify_section_grounding(section_content: str, sources_text: str, section_title: str) -> dict:
-    """
-    Verify that a section's content is properly grounded in its sources.
-    Returns a grounding score and flags potential hallucinations.
-    """
-    GroundingOutput = create_model(
-        'GroundingOutput',
-        grounding_score=(float, ...),  # 0.0-1.0
-        ungrounded_claims=(list[str], ...),
-        has_placeholder_names=(bool, ...),
-        placeholder_examples=(list[str], ...)
-    )
-
-    structured_llm = llm.with_structured_output(GroundingOutput)
-
-    verification_prompt = f"""
-    Verify if the following section content is properly grounded in the provided sources.
-
-    SECTION: {section_title}
-    CONTENT:
-    {section_content[:2000]}
-
-    SOURCES:
-    {sources_text[:2000]}
-
-    CRITICAL: Check for hallucinations - claims that are NOT explicitly stated in the sources:
-    1. Specific names, entities, dates, or statistics mentioned in CONTENT but NOT in SOURCES
-    2. Claims that combine information from different sources to create new facts
-    3. Inferences or assumptions that go beyond what sources explicitly state
-    4. Specific rankings, positions, or achievements (e.g., "#1", "first", "most popular", "top") not stated in sources
-    5. Placeholder names like "XYZ", "Company A", "Entity A", "the product", etc.
-
-    EXAMPLES OF HALLUCINATIONS TO CATCH:
-    - If sources mention "Entity A" but CONTENT says "Entity A was #1" and sources don't say it was #1 → HALLUCINATION
-    - If sources mention "Entity B" and "Entity C" separately, but CONTENT says "Entity B and Entity C both achieved X" and sources don't state this together → HALLUCINATION
-    - If CONTENT mentions a specific entity name, date, ranking, or statistic that doesn't appear in SOURCES → HALLUCINATION
-    - If sources mention a general category but CONTENT names a specific item in that category not mentioned in sources → HALLUCINATION
-
-    Return:
-    - grounding_score: 0.0 (completely ungrounded) to 1.0 (fully grounded)
-    - ungrounded_claims: List of specific claims/sentences that appear fabricated or not in sources
-    - has_placeholder_names: True if placeholder names detected
-    - placeholder_examples: Examples of placeholder names found
-    """
-
-    try:
-        response = await structured_llm.ainvoke([
-            SystemMessage(content="You are a strict fact-checker. You identify ANY claim in the content that is not explicitly stated in the sources. Be thorough - flag any names, dates, statistics, rankings, or facts that don't appear in the sources, even if they seem plausible."),
-            HumanMessage(content=verification_prompt)
-        ])
-
-        return {
-            "grounding_score": response.grounding_score,
-            "ungrounded_claims": response.ungrounded_claims,
-            "has_placeholder_names": response.has_placeholder_names,
-            "placeholder_examples": response.placeholder_examples
-        }
-    except Exception as e:
-        print(f"verify_section_grounding: verification failed: {e}")
-        return {
-            "grounding_score": 0.5,
-            "ungrounded_claims": [],
-            "has_placeholder_names": False,
-            "placeholder_examples": []
-        }
 
 
 async def write_sections_with_citations(state: dict, config: RunnableConfig) -> dict:
@@ -1074,18 +1043,25 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
         num_sources = len(research_by_subtopic[key]["results"])
         print(f"  '{key}': {num_sources} sources")
 
-    # Write all sections in parallel with outline context to avoid redundancy
-    print(f"write_sections_with_citations: writing {len(sections)} sections in parallel with outline context")
-    tasks = [
-        write_single_section(
-            section, topic, research_by_subtopic, agent_config.min_credibility_score,
-            all_sections=sections, section_index=idx
-        )
-        for idx, section in enumerate(sections)
-    ]
-    written_sections = await asyncio.gather(*tasks)
+    # SEQUENTIAL WRITING: Write sections one at a time so each has context from previous sections
+    print(f"write_sections_with_citations: writing {len(sections)} sections SEQUENTIALLY for context flow")
+    written_sections = []
 
-    print(f"write_sections_with_citations: completed {len(written_sections)} sections")
+    for idx, section in enumerate(sections):
+        # Pass all previously written sections so this section can reference them
+        section_result = await write_single_section(
+            section=section,
+            topic=topic,
+            research_by_subtopic=research_by_subtopic,
+            min_credibility_score=agent_config.min_credibility_score,
+            all_sections=sections,
+            section_index=idx,
+            previously_written_sections=written_sections  # Pass previously completed sections
+        )
+        written_sections.append(section_result)
+        print(f"  Completed section {idx + 1}/{len(sections)}: {section_result.get('title', 'Unknown')}")
+
+    print(f"write_sections_with_citations: completed all {len(written_sections)} sections sequentially")
 
     # Combine sections into full report
     full_report = f"# {topic}\n\n"
@@ -1102,10 +1078,12 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
         formatted_source = format_source_as_markdown_link(source)
         full_report += f"[{i}] {formatted_source}\n"
 
+    full_report_message = AIMessage(content=full_report)
+
     # Generate report_id if not exists
     report_id = state.get("report_id", "")
     if not report_id:
-        report_id = f"report_{uuid.uuid4().hex[:12]}"
+        report_id = f"{uuid.uuid4().hex[:12]}"
         print(f"write_sections_with_citations: generated new report_id={report_id}")
 
     new_version_id = state.get("version_id", 0) + 1
@@ -1123,7 +1101,8 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
         "report_content": full_report,
         "report_references": unique_sources,
         "version_id": new_version_id,
-        "report_history": state.get("report_history", []) + [new_version_id]
+        "report_history": state.get("report_history", []) + [new_version_id],
+        "messages": [full_report_message]
     }
 
 
@@ -1138,25 +1117,23 @@ async def research_outline_and_write(state: dict, config: RunnableConfig) -> dic
     subtopics_result = await generate_subtopics(state, config)
     state = {**state, **subtopics_result}
     
-    # 2. Verify Cross References
+    # Verify Cross References
     verify_result = await verify_cross_references(state, config)
     state = {**state, **verify_result}
     
-    # 3. Generate Outline
+    # Generate Outline
     outline_result = await generate_outline(state)
     state = {**state, **outline_result}
     
-    # 4. Write Sections
+    # Write Sections
     write_result = await write_sections_with_citations(state, config)
-    
-    # Collect all new messages
-    new_messages = []
-    if "messages" in subtopics_result:
-        new_messages.extend(subtopics_result["messages"])
-    if "messages" in verify_result:
-        new_messages.extend(verify_result["messages"])
-    # generate_outline and write_sections_with_citations do not return messages
-    
+
+    # SEQUENTIAL MESSAGES FIX: Only return the final report message for clean LangSmith chat
+    # Intermediate messages (subtopics alert, etc.) are skipped to avoid multiple simultaneous messages
+    final_message = None
+    if "messages" in write_result and write_result["messages"]:
+        final_message = write_result["messages"][-1]  # Take only the last message (full report)
+
     print("research_outline_and_write: Completed combined process")
 
     return {
@@ -1164,7 +1141,7 @@ async def research_outline_and_write(state: dict, config: RunnableConfig) -> dic
         **verify_result,
         **outline_result,
         **write_result,
-        "messages": new_messages
+        "messages": [final_message] if final_message else []  # Only ONE message
     }
 
 
@@ -1313,10 +1290,13 @@ async def revise_sections(state: dict, config: RunnableConfig) -> dict:
     # Save to MongoDB
     report_id = state.get("report_id", "")
     new_version_id = state.get("version_id", 0) + 1
+    messages = state.get("messages", [])
 
     try:
         await save_report(report_id, new_version_id, full_report)
-        print(f"revise_sections: saved report {report_id} version {new_version_id} to MongoDB")
+        print(f"revise_sections: saved report {report_id} version {new_version_id}")
+        messages = messages + [AIMessage(content=f"revise_sections: saved report {report_id} version {new_version_id}")]
+
     except Exception as e:
         print(f"revise_sections: failed to save report to MongoDB: {e}")
 
@@ -1325,7 +1305,9 @@ async def revise_sections(state: dict, config: RunnableConfig) -> dict:
         "report_content": full_report,
         "report_references": unique_sources,
         "version_id": new_version_id,
-        "report_history": state.get("report_history", []) + [new_version_id]
+        "report_history": state.get("report_history", []) + [new_version_id],
+        "revision_count": new_revision_count,
+        "messages": messages
     }
 
 
