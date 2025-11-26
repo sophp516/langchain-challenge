@@ -32,15 +32,9 @@ def create_agent(use_checkpointer=False):
     workflow.add_node("check_initial_context", check_initial_context)
     workflow.add_node("generate_clarification", generate_clarification_question)
     workflow.add_node("collect_response", collect_user_response)
-    workflow.add_node("validate_context", validate_context_after_clarification)
 
     # Research Workflow Nodes
-    workflow.add_node("generate_subtopics", generate_subtopics)
-    workflow.add_node("verify_cross_references", verify_cross_references)
-
-    # Report Writing Nodes
-    workflow.add_node("generate_outline", generate_outline)
-    workflow.add_node("write_sections", write_sections_with_citations)
+    workflow.add_node("research_outline_and_write", research_outline_and_write)  # MERGED: generate_subtopics + verify + outline + write
     workflow.add_node("revise_sections", revise_sections)  # Targeted section revision
 
     # User Feedback Nodes (after full report is generated)
@@ -81,39 +75,26 @@ def create_agent(use_checkpointer=False):
         "check_initial_context",
         route_after_initial_check,
         {
-            "continue": "generate_subtopics",
+            "continue": "research_outline_and_write",
             "ask_clarification": "generate_clarification"
         }
     )
 
-    # Clarification loop - conditional: if ENOUGH_CONTEXT, skip to research
+    # Clarification loop
+    # generate_clarification checks if enough context, routes accordingly
     workflow.add_conditional_edges(
         "generate_clarification",
         route_after_initial_check,  # checks is_finalized
         {
-            "continue": "generate_subtopics",  # LLM said ENOUGH_CONTEXT
+            "continue": "research_outline_and_write",  # LLM said ENOUGH_CONTEXT
             "ask_clarification": "collect_response"  # Need user input
         }
     )
-    workflow.add_edge("collect_response", "validate_context")
-    workflow.add_conditional_edges(
-        "validate_context",
-        route_after_clarification,
-        {
-            "continue": "generate_subtopics",
-            "ask_clarification": "generate_clarification"
-        }
-    )
+    # After collecting user response, go back to generate_clarification to validate
+    workflow.add_edge("collect_response", "generate_clarification")
 
-    # Research Flow with Cross-Reference Verification
-    workflow.add_edge("generate_subtopics", "verify_cross_references")
-
-    # Report Writing Flow
-    workflow.add_edge("verify_cross_references", "generate_outline")
-    workflow.add_edge("generate_outline", "write_sections")
-
-    # LLM Evaluation Flow (after writing sections)
-    workflow.add_edge("write_sections", "evaluate_report")
+    # Research Flow
+    workflow.add_edge("research_outline_and_write", "evaluate_report")
     workflow.add_conditional_edges(
         "evaluate_report",
         route_after_evaluation,

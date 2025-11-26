@@ -42,7 +42,7 @@ llm_with_tools = llm.bind_tools(report_tools)
 
 
 # ============================================================================
-# INTENT ROUTING NODES
+# NODES
 # ============================================================================
 
 async def check_user_intent(state: dict) -> dict:
@@ -338,10 +338,11 @@ def check_initial_context(state: dict, config: RunnableConfig) -> dict:
     }
 
 
-def generate_clarification_question(state: dict, config: RunnableConfig) -> dict:
+async def generate_clarification_question(state: dict, config: RunnableConfig) -> dict:
     """
     Generate a clarification question based on current topic and previous responses.
     This node uses LLM to determine what information is still needed.
+    Also validates if we have enough context after receiving user responses.
     """
     agent_config = get_config_from_configurable(config.get("configurable", {}))
 
@@ -352,27 +353,33 @@ def generate_clarification_question(state: dict, config: RunnableConfig) -> dict
 
     print(f"generate_clarification_question: round={clarification_rounds}, topic='{topic[:50]}...'")
 
-    # If we've asked too many questions, skip this process
+    # If we've asked too many questions, finalize with what we have
     if clarification_rounds >= agent_config.max_clarification_rounds:
         print(f"generate_clarification_question: max rounds reached ({agent_config.max_clarification_rounds}), finalizing")
+        # Build finalized topic from existing context
+        finalized_topic = topic
+        if user_responses:
+            finalized_topic += " " + " ".join(user_responses)
         return {
             "is_finalized": True,
+            "topic": finalized_topic.strip(),
             "clarification_rounds": clarification_rounds
         }
 
+    # Build context with all Q&A so far
     context = f"Topic: {topic}\n"
-    if clarification_questions:
-        context += "\nPrevious questions asked:\n"
+    if clarification_questions and user_responses:
+        context += "\nPrevious Q&A:\n"
         for i, (q, r) in enumerate(zip(clarification_questions, user_responses)):
             context += f"Q{i+1}: {q}\nA{i+1}: {r}\n"
-    
-    # Generate a clarification question
+
+    # Generate a clarification question OR determine if we have enough context
     clarification_prompt = f"""
     You are a research assistant helping to clarify a research topic.
 
     Current topic: {topic}
 
-    {context if clarification_rounds > 0 else "This is the initial topic."}
+    {context if user_responses else "This is the initial topic."}
 
     CRITICAL RULES - ONLY ask for information that CANNOT be researched:
     1. DO NOT ask about information already present in the topic or previous responses
@@ -380,14 +387,14 @@ def generate_clarification_question(state: dict, config: RunnableConfig) -> dict
     3. DO NOT ask "What metrics are used?" or "What criteria determine X?" - research can find this
     4. DO NOT ask "How is X measured?" or "What are standard practices?" - research can answer this
     5. DO NOT ask about definitions or technical terms - research can provide these
-    
+
     ONLY ask for:
     - User-specific preferences (e.g., "Which specific items/entities do you want to compare?")
     - Missing constraints that are user choices (e.g., "What time period?" if not mentioned)
     - Ambiguities that require user input (e.g., "Do you mean X or Y?" when both are possible)
-    
+
     If the topic has a clear subject and at least one constraint (time, category, scope, etc.), respond with "ENOUGH_CONTEXT"
-    
+
     Examples:
     - Topic "most popular X of 2025" + user said "criteria A and criteria B" → ENOUGH_CONTEXT (agent can research what metrics are used)
     - Topic "MMORPG games in 2026" → ENOUGH_CONTEXT (has subject + time)
@@ -396,26 +403,33 @@ def generate_clarification_question(state: dict, config: RunnableConfig) -> dict
 
     Return ONLY the question (or "ENOUGH_CONTEXT"), nothing else.
     """
-    
+
     messages = [
         SystemMessage(content="You are a helpful research assistant. You ONLY ask for information that requires user input and cannot be discovered through research. You do NOT ask about standard metrics, criteria, definitions, or methodologies - these can be researched. Be conservative - if the topic has a clear subject and constraints, mark it as ENOUGH_CONTEXT."),
         HumanMessage(content=clarification_prompt)
     ]
 
-    response = llm.invoke(messages)
+    response = await llm.ainvoke(messages)
     question = response.content.strip() if hasattr(response, 'content') else str(response).strip()
 
+    # Check if we have enough context
     if question.upper() == "ENOUGH_CONTEXT" or "enough context" in question.lower():
-        print("generate_clarification_question: LLM indicated enough context")
+        print("generate_clarification_question: LLM indicated enough context, finalizing")
+        # Build finalized topic incorporating user responses
+        finalized_topic = topic
+        if user_responses:
+            finalized_topic += " " + " ".join(user_responses)
         return {
             "is_finalized": True,
+            "topic": finalized_topic.strip(),
             "clarification_rounds": clarification_rounds
         }
 
+    # Not enough context yet, ask another question
     new_questions = clarification_questions + [question]
     print(f"generate_clarification_question: generated question='{question[:100]}...'")
     clarification_question = AIMessage(content=question)
-    
+
     return {
         "messages": [clarification_question],
         "clarification_questions": new_questions,
@@ -448,91 +462,6 @@ def collect_user_response(state: dict) -> dict:
         "user_responses": new_responses,
         "messages": [HumanMessage(content=user_response)]
     }
-
-
-async def validate_context_after_clarification(state: dict, config: RunnableConfig) -> dict:
-    """
-    Validate if we have enough context after collecting clarification responses.
-    Uses LLM to evaluate if the topic and clarifications provide sufficient info.
-    """
-    agent_config = get_config_from_configurable(config.get("configurable", {}))
-
-    clarification_rounds = state.get("clarification_rounds", 0)
-    topic = state.get("topic", "")
-    clarification_questions = state.get("clarification_questions", [])
-    user_responses = state.get("user_responses", [])
-
-    context = f"Research Topic: {topic}\n\n"
-
-    if clarification_questions:
-        context += "Clarification Q&A:\n"
-        for i, (q, r) in enumerate(zip(clarification_questions, user_responses)):
-            context += f"Q{i + 1}: {q}\nA{i + 1}: {r}\n\n"
-
-    TopicEvaluationOutput = create_model(
-        'TopicEvaluationOutput',
-        is_sufficient=(bool, ...),
-        finalized_topic=(str, ...)
-    )
-
-    structured_llm = llm.with_structured_output(TopicEvaluationOutput)
-
-    validation_prompt = f"""
-You are evaluating whether there is enough information to conduct comprehensive research.
-
-{context}
-
-Your task:
-1. Decide whether the information is sufficient to finalize the topic and proceed with research.
-2. Provide your recommended finalized topic regardless of sufficiency.
-
-Definition of sufficiency (BE LENIENT):
-- Topic has a clear subject/entity
-- Topic has at least one constraint (time period, category, scope, criteria, etc.)
-- You can identify what to research, even if some details need to be discovered through research
-- Standard metrics, criteria, definitions, and methodologies can be researched - don't require them upfront
-
-IMPORTANT - Be generous in marking as sufficient:
-- If the topic mentions criteria like "success metrics" or "evaluation criteria", that's ENOUGH - you can research what specific metrics are used
-- If the topic has subject + constraint, it's sufficient even if some technical details are missing
-- Only mark as insufficient if the topic is truly vague or missing fundamental constraints
-
-Examples:
-- "most popular X of 2025" + "criteria A and criteria B" → SUFFICIENT (can research metrics)
-- "MMORPG games in 2026" → SUFFICIENT (has subject + time)
-- "games" → INSUFFICIENT (too vague, no constraint)
-
-Return ONLY the following fields in JSON form for structured parsing:
-- `is_sufficient`: true/false
-- `finalized_topic`: string
-"""
-    messages = [
-        SystemMessage(content="You are a research coordinator evaluating context. Be LENIENT - if a topic has a clear subject and constraints, mark it as sufficient even if some technical details are missing. The agent can research standard metrics, criteria, and methodologies. Only mark as insufficient if truly vague or missing fundamental constraints."),
-        HumanMessage(content=validation_prompt)
-    ]
-
-    response = await structured_llm.ainvoke(messages)
-
-    is_sufficient = bool(response.is_sufficient)
-    finalized_topic = response.finalized_topic.strip()
-
-    print(f"validate_context_after_clarification: is_sufficient={is_sufficient}, rounds={clarification_rounds}")
-
-    # If we hit the round limit, finalize no matter what
-    if clarification_rounds >= agent_config.max_clarification_rounds:
-        return {
-            "is_finalized": True,
-            "topic": finalized_topic,
-            "clarification_rounds": clarification_rounds
-        }
-
-    if is_sufficient: # Start generating subtopics
-        return {
-            "is_finalized": True,
-            "topic": finalized_topic
-        }
-
-    return {"is_finalized": False}
 
 
 
@@ -619,54 +548,6 @@ async def generate_subtopics(state: dict, config: RunnableConfig) -> dict:
 
     subtopics = llm_response.subtopics
     print(f"generate_subtopics: generated {len(subtopics)} subtopics")
-    
-    # Validate subtopics are relevant to the main topic
-    if subtopics:
-        RelevanceCheckOutput = create_model(
-            'RelevanceCheckOutput',
-            relevant_subtopics=(list[str], ...),
-            reasoning=(str, ...)
-        )
-        
-        relevance_llm = llm.with_structured_output(RelevanceCheckOutput)
-        
-        relevance_prompt = f"""
-        Review the following subtopics for the main topic: "{topic}"
-        
-        Subtopics:
-        {chr(10).join(f"{i+1}. {st}" for i, st in enumerate(subtopics))}
-        
-        The main topic asks: "{topic}"
-        
-        Filter out subtopics that are:
-        - Tangential background (e.g., "Cultural Impact", "General Trends", "Background History" for "most popular X")
-        - General context that doesn't identify/rank/compare specific items
-        - Topics that are related but don't directly contribute to answering the core question
-        
-        Keep subtopics that:
-        - Directly identify, rank, or compare specific items/entities
-        - Focus on metrics, data, or evidence that answers the question
-        - Help determine "most popular", "best", "top", etc. through specific criteria
-        
-        Return the filtered list of relevant subtopics (keep all if they're all relevant).
-        """
-        
-        try:
-            relevance_check = await relevance_llm.ainvoke([
-                SystemMessage(content="You filter subtopics to ensure they directly answer the main question. Remove any that are tangential or provide only background context."),
-                HumanMessage(content=relevance_prompt)
-            ])
-            
-            if relevance_check.relevant_subtopics and len(relevance_check.relevant_subtopics) > 0:
-                original_count = len(subtopics)
-                subtopics = relevance_check.relevant_subtopics
-                print(f"generate_subtopics: filtered from {original_count} to {len(subtopics)} relevant subtopics")
-                if original_count != len(subtopics):
-                    print(f"generate_subtopics: filtering reasoning: {relevance_check.reasoning}")
-            else:
-                print("generate_subtopics: relevance check returned empty, using original subtopics")
-        except Exception as e:
-            print(f"generate_subtopics: relevance check failed: {e}, using original subtopics")
 
     # Generate subresearchers for each subtopic in parallel
     async def process_subtopic(idx: int, subtopic: str, main_topic: str):
@@ -680,7 +561,6 @@ async def generate_subtopics(state: dict, config: RunnableConfig) -> dict:
             "research_depth": 1,  # Start at layer 1
             "source_credibilities": {},
             "follow_up_queries": [],
-            # Pass config values to subresearcher
             "max_search_results": agent_config.max_search_results,
             "max_research_depth": agent_config.max_research_depth,
             "search_api": agent_config.search_api
@@ -855,6 +735,10 @@ async def generate_outline(state: dict) -> dict:
         }
 
     print(f"generate_outline: created outline with {len(outline.get('sections', []))} sections")
+
+    # DEBUG: Log the outline to see what subtopics are mapped
+    for section in outline.get("sections", []):
+        print(f"  Section: '{section.get('title', '')}' -> Subtopics: {section.get('subtopics', [])}")
 
     return {
         "report_outline": outline,
@@ -1086,7 +970,8 @@ async def write_single_section(
     return {
         "title": section_title,
         "content": section_content,
-        "sources": sources_list
+        "sources": sources_list,
+        "subtopics": section_subtopics  # CRITICAL: Preserve subtopics for revisions
     }
 
 
@@ -1183,6 +1068,12 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
             "credibilities": researcher.get("source_credibilities", {})
         }
 
+    # DEBUG: Log available research keys
+    print(f"write_sections_with_citations: Available research keys:")
+    for key in research_by_subtopic.keys():
+        num_sources = len(research_by_subtopic[key]["results"])
+        print(f"  '{key}': {num_sources} sources")
+
     # Write all sections in parallel with outline context to avoid redundancy
     print(f"write_sections_with_citations: writing {len(sections)} sections in parallel with outline context")
     tasks = [
@@ -1233,6 +1124,47 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
         "report_references": unique_sources,
         "version_id": new_version_id,
         "report_history": state.get("report_history", []) + [new_version_id]
+    }
+
+
+async def research_outline_and_write(state: dict, config: RunnableConfig) -> dict:
+    """
+    Merged node: Perform research, verification, outline, and writing.
+    Combines generate_subtopics, verify_cross_references, generate_outline, and write_sections_with_citations.
+    """
+    print("research_outline_and_write: Starting combined research and writing process")
+    
+    # 1. Generate Subtopics & Research
+    subtopics_result = await generate_subtopics(state, config)
+    state = {**state, **subtopics_result}
+    
+    # 2. Verify Cross References
+    verify_result = await verify_cross_references(state, config)
+    state = {**state, **verify_result}
+    
+    # 3. Generate Outline
+    outline_result = await generate_outline(state)
+    state = {**state, **outline_result}
+    
+    # 4. Write Sections
+    write_result = await write_sections_with_citations(state, config)
+    
+    # Collect all new messages
+    new_messages = []
+    if "messages" in subtopics_result:
+        new_messages.extend(subtopics_result["messages"])
+    if "messages" in verify_result:
+        new_messages.extend(verify_result["messages"])
+    # generate_outline and write_sections_with_citations do not return messages
+    
+    print("research_outline_and_write: Completed combined process")
+
+    return {
+        **subtopics_result,
+        **verify_result,
+        **outline_result,
+        **write_result,
+        "messages": new_messages
     }
 
 
@@ -1397,6 +1329,75 @@ async def revise_sections(state: dict, config: RunnableConfig) -> dict:
     }
 
 
+async def search_based_on_feedback(
+    section_title: str,
+    topic: str,
+    evaluator_feedback: str
+) -> dict:
+    """
+    Extract search needs directly from Gemini evaluator feedback and search for specific information.
+
+    Returns dict of {source_key: source_content} for additional sources found.
+    """
+    # Look for keywords indicating specific information needs
+    feedback_lower = evaluator_feedback.lower()
+
+    # Keywords that indicate need for additional search
+    search_indicators = [
+        "missing", "lacks", "needs more", "insufficient", "not enough",
+        "should include", "could benefit from", "add more", "expand on",
+        "more detail", "more information", "more specific", "more examples"
+    ]
+
+    needs_search = any(indicator in feedback_lower for indicator in search_indicators)
+
+    if not needs_search:
+        print(f"      No search indicators in feedback for '{section_title}'")
+        return {}
+
+    # Extract what needs to be searched from the feedback
+    # Build targeted search query based on section title + topic + feedback hints
+    search_query = f"{topic} {section_title}"
+
+    # Look for specific topics mentioned after search indicators
+    for indicator in search_indicators:
+        if indicator in feedback_lower:
+            # Find text after the indicator (next 50 chars)
+            idx = feedback_lower.find(indicator)
+            context = evaluator_feedback[idx:idx+100]
+            # Add context to search
+            search_query += f" {context}"
+            break
+
+    print(f"      Searching for additional info based on feedback: '{search_query[:80]}...'")
+
+    # Execute search
+    additional_sources = {}
+    try:
+        loop = asyncio.get_event_loop()
+        search_results = await loop.run_in_executor(
+            None,
+            lambda: tavily_client.search(query=search_query, max_results=3)
+        )
+
+        results = search_results.get("results", [])
+        print(f"      Found {len(results)} additional sources")
+
+        for result in results:
+            source_url = result.get("url", "")
+            source_title = result.get("title", "Untitled")
+            source_content = result.get("content", "")
+
+            if source_content:
+                source_key = f"{source_title} ({source_url})"
+                additional_sources[source_key] = source_content[:800]
+
+    except Exception as e:
+        print(f"      Search failed: {e}")
+
+    return additional_sources
+
+
 async def revise_single_section(
     section: dict,
     topic: str,
@@ -1407,6 +1408,11 @@ async def revise_single_section(
     """
     Revise a single section based on evaluator feedback from Gemini.
     Uses the original content as a base and improves it according to the feedback.
+
+    Two-phase approach:
+    1. Analyze feedback to identify specific information gaps
+    2. Search for that specific information if needed
+    3. Make targeted revisions with the additional context
     """
     section_title = section.get("title", "")
     original_content = section.get("original_content", "")
@@ -1414,7 +1420,7 @@ async def revise_single_section(
 
     print(f"    Revising: {section_title}")
 
-    # Gather relevant research
+    # Gather relevant research from existing sources
     relevant_research = ""
     sources_list = []
 
@@ -1427,6 +1433,20 @@ async def revise_single_section(
                 if credibilities.get(source, 0.5) >= min_credibility_score:
                     relevant_research += f"\nSource: {source}\n{findings}\n"
                     sources_list.append(source)
+
+    # PHASE 1: Search for additional information based on Gemini feedback
+    additional_sources = await search_based_on_feedback(
+        section_title=section_title,
+        topic=topic,
+        evaluator_feedback=evaluator_feedback
+    )
+
+    # Add the additional sources to our research pool
+    if additional_sources:
+        print(f"      Found {len(additional_sources)} additional targeted sources")
+        for source_key, source_content in additional_sources.items():
+            relevant_research += f"\nSource (targeted search): {source_key}\n{source_content}\n"
+            sources_list.append(source_key)
 
     revision_prompt = f"""
     You are revising the "{section_title}" section of a research report on: {topic}
@@ -1448,12 +1468,15 @@ async def revise_single_section(
     5. If sources don't provide enough info to address feedback, acknowledge the limitation
     6. It's better to make conservative improvements than to fabricate information
 
-    INSTRUCTIONS:
-    - Keep accurate parts of original content
-    - Address the evaluator's feedback using ONLY information from the sources provided
-    - Improve coverage, evidence, structure, or clarity as suggested by the feedback
-    - Add citations [1], [2] for all new claims
-    - Enhance existing content with additional details from sources where relevant
+    **REVISION APPROACH - INCREMENTAL FIXES ONLY:**
+    - This is a REVISION, not a rewrite - preserve the structure and flow of the original
+    - Make MINIMAL, TARGETED changes to address specific feedback points
+    - Keep all accurate content unchanged - only fix what needs fixing
+    - Add missing information where gaps are identified
+    - Clarify confusing parts without restructuring entire paragraphs
+    - Remove or correct inaccurate claims
+    - Add citations [1], [2] only for new claims
+    - If the original content is mostly good, make small additions/corrections rather than rewriting
     - If sources don't support addressing specific feedback, note: "Additional research needed on [topic]"
 
     Return ONLY the revised section content (no title/header).
@@ -1673,18 +1696,6 @@ def route_after_initial_check(state: dict) -> str:
     is_finalized = state.get("is_finalized", False)
     route = "continue" if is_finalized else "ask_clarification"
     print(f"route_after_initial_check: is_finalized={is_finalized}, routing to '{route}'")
-    return route
-
-
-def route_after_clarification(state: dict) -> str:
-    """
-    Conditional edge: Route after collecting clarification response.
-    - If sufficient context: proceed to subtopic generation
-    - If insufficient: loop back to ask another clarification question
-    """
-    is_finalized = state.get("is_finalized", False)
-    route = "continue" if is_finalized else "ask_clarification"
-    print(f"route_after_clarification: is_finalized={is_finalized}, routing to '{route}'")
     return route
 
 

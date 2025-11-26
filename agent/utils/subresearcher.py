@@ -69,7 +69,7 @@ async def process_source(
         HumanMessage(content=summary_prompt)
     ]
 
-    summary_response = await llm_quality.ainvoke(messages)
+    summary_response = await llm.ainvoke(messages)
     findings = summary_response.content if hasattr(summary_response, 'content') else str(summary_response)
 
     # Create a source identifier with credibility indicator
@@ -177,6 +177,8 @@ async def analyze_and_generate_follow_ups(state: SubResearcherGraphState) -> Sub
     current_depth = state.get("research_depth", 1)
     max_research_depth = state.get("max_research_depth", 2)
 
+    # IMPORTANT: Only skip follow-ups if we've COMPLETED at least one deep dive
+    # This ensures we always do minimum 2 layers of research
     if current_depth >= max_research_depth:  # Max depth reached
         print(f"[Layer {current_depth}] Max depth reached ({max_research_depth}), no follow-ups needed")
         return {"follow_up_queries": []}
@@ -198,6 +200,15 @@ async def analyze_and_generate_follow_ups(state: SubResearcherGraphState) -> Sub
     Focus your follow-up queries on aspects unique to YOUR subtopic that won't overlap with the above.
     """
 
+    # For Layer 1, be more aggressive about generating follow-ups to ensure deep research
+    layer_1_instruction = ""
+    if current_depth == 1:
+        layer_1_instruction = """
+    CRITICAL: This is Layer 1 (initial research). You MUST generate 2-3 follow-up queries to ensure thorough research.
+    Do NOT mark as "COMPREHENSIVE" at Layer 1 - initial research always needs deeper investigation.
+    Focus on specific aspects that need more detail, verification, or recent updates.
+    """
+
     analysis_prompt = f"""
     You are analyzing research on the subtopic: {subtopic}
     Main research topic: {main_topic}
@@ -206,18 +217,20 @@ async def analyze_and_generate_follow_ups(state: SubResearcherGraphState) -> Sub
     {findings_summary}
     {other_subtopics_context}
     This is research layer {current_depth} of {max_research_depth}.
+    {layer_1_instruction}
 
     Analyze the findings and identify 2-3 specific follow-up queries that would:
     1. Fill gaps in coverage THAT IS DIRECTLY RELEVANT TO THE MAIN TOPIC AND SUBTOPIC
     2. Explore promising areas in more depth (still needs to be directly relevant)
     3. Clarify ambiguous or interesting points
     4. Find more recent or specialized information
+    5. Verify or expand on key claims from Layer 1 findings
 
     Each query should be specific and different from the original subtopic query.
     IMPORTANT: Do NOT generate queries that overlap with other subtopics being researched.
 
     Return ONLY the queries, one per line, without numbering or bullets.
-    If the research seems comprehensive, return "COMPREHENSIVE" instead.
+    Only mark as "COMPREHENSIVE" if this is Layer {max_research_depth} or higher.
     """
 
     messages = [
@@ -228,15 +241,32 @@ async def analyze_and_generate_follow_ups(state: SubResearcherGraphState) -> Sub
     response = await llm.ainvoke(messages)
     response_text = response.content if hasattr(response, 'content') else str(response)
 
+    # Check if marked as comprehensive
     if "COMPREHENSIVE" in response_text.upper():
-        print(f"[Layer {current_depth}] Research deemed comprehensive, no follow-ups needed")
-        return {"follow_up_queries": []}
+        # SAFEGUARD: Never end at Layer 1 - always do at least 2 layers
+        if current_depth == 1:
+            print(f"[Layer {current_depth}] LLM marked as comprehensive, but Layer 1 must continue. Generating default follow-ups.")
+            # Generate generic but useful follow-up queries for Layer 1
+            follow_up_queries = [
+                f"{subtopic} - recent developments and updates",
+                f"{subtopic} - detailed analysis and specific examples"
+            ]
+            print(f"[Layer {current_depth}] Generated {len(follow_up_queries)} default follow-up queries")
+            return {"follow_up_queries": follow_up_queries}
+        else:
+            print(f"[Layer {current_depth}] Research deemed comprehensive, no follow-ups needed")
+            return {"follow_up_queries": []}
 
     # Parse follow-up queries
     follow_up_queries = [
         line.strip() for line in response_text.strip().split('\n')
         if line.strip() and not line.strip().startswith(('#', '-', '*'))
     ]
+
+    # SAFEGUARD: If Layer 1 and no queries generated, force at least one follow-up
+    if current_depth == 1 and len(follow_up_queries) == 0:
+        print(f"[Layer {current_depth}] No follow-ups generated at Layer 1. Adding default query.")
+        follow_up_queries = [f"{subtopic} - detailed analysis and recent updates"]
 
     print(f"[Layer {current_depth}] Generated {len(follow_up_queries)} follow-up queries")
 
