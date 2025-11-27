@@ -4,7 +4,9 @@ from langgraph.graph import StateGraph, END
 from pydantic import create_model
 from utils.model import llm
 from utils.configuration import tavily_client, serper_client, fetch_full_content
+from utils.nodes.helpers import filter_quality_sources
 import asyncio
+from urllib.parse import urlparse
 
 
 class SubResearcherGraphState(TypedDict):
@@ -34,6 +36,159 @@ class SubResearcherGraphState(TypedDict):
     entities: list[str]  # Extracted entities to research
     research_plan: list[dict]  # Planned searches based on subtopics/questions
     completed_searches: int  # Track progress
+
+    # DYNAMIC DEEPENING STATE
+    discovered_gaps: list[str]  # Knowledge gaps found during research
+    discovered_entities: list[str]  # New entities/topics discovered in results
+    coverage_score: float  # Estimated coverage of the topic (0.0-1.0)
+    needs_deepening: bool  # Flag to trigger additional research round
+
+    # SHARED KNOWLEDGE POOL (cross-section learning)
+    shared_research_pool: dict  # Shared entities and findings from other sections
+
+
+# ============================================================================
+# HELPER FUNCTIONS - QUALITY FILTERING & PARALLELIZATION
+# ============================================================================
+
+def quick_domain_quality_score(url: str) -> float:
+    """
+    Quick domain-based quality assessment without LLM.
+    Returns a score from 0.0 (low quality) to 1.0 (high quality).
+
+    This enables early filtering before expensive API calls.
+    """
+    try:
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+
+        # High-quality domains (academic, government, established news)
+        high_quality_patterns = [
+            '.edu', '.gov', '.org',
+            'scholar.google', 'arxiv.org', 'pubmed', 'nature.com', 'science.org',
+            'ieee.org', 'acm.org', 'springer.com', 'sciencedirect.com',
+            'nytimes.com', 'wsj.com', 'bloomberg.com', 'reuters.com',
+            'bbc.com', 'theguardian.com', 'economist.com', 'forbes.com',
+            'wikipedia.org', 'britannica.com'
+        ]
+
+        # Medium-quality domains (reputable general sources)
+        medium_quality_patterns = [
+            'medium.com', 'substack.com', 'news.ycombinator.com',
+            'techcrunch.com', 'wired.com', 'arstechnica.com',
+            'stackoverflow.com', 'github.com', 'reddit.com'
+        ]
+
+        # Low-quality patterns (spam, ads, low-trust)
+        low_quality_patterns = [
+            'pinterest.com', 'quora.com', 'yahoo.answers',
+            'clickbait', 'viral', 'buzz', 'gossip',
+            'ads', 'promo', 'sale', 'buy'
+        ]
+
+        # Check high quality
+        for pattern in high_quality_patterns:
+            if pattern in domain:
+                return 0.9
+
+        # Check medium quality
+        for pattern in medium_quality_patterns:
+            if pattern in domain:
+                return 0.6
+
+        # Check low quality
+        for pattern in low_quality_patterns:
+            if pattern in domain or pattern in url.lower():
+                return 0.2
+
+        # Default: neutral quality
+        return 0.5
+
+    except Exception:
+        return 0.5  # Default on parsing error
+
+
+def filter_results_by_domain_quality(results: list[dict], min_score: float = 0.3) -> list[dict]:
+    """
+    Filter search results by domain quality before deep processing.
+    Removes low-quality domains early to save API quota.
+
+    Args:
+        results: List of search results with 'url' field
+        min_score: Minimum quality score to keep (0.0-1.0)
+
+    Returns:
+        Filtered list of results
+    """
+    filtered = []
+    for result in results:
+        url = result.get("url", "")
+        if not url:
+            continue
+
+        quality = quick_domain_quality_score(url)
+        if quality >= min_score:
+            filtered.append(result)
+
+    return filtered
+
+
+async def parallel_search_with_rate_limit(
+    queries: list[tuple[str, dict]],
+    search_api: str,
+    max_results: int,
+    max_concurrent: int = 3
+) -> list[tuple[str, list[dict]]]:
+    """
+    Execute multiple search queries in parallel with rate limiting.
+
+    Args:
+        queries: List of (query_string, metadata) tuples
+        search_api: "tavily" or "serper"
+        max_results: Max results per query
+        max_concurrent: Max concurrent searches (default 3 for rate limits)
+
+    Returns:
+        List of (query_string, results_list) tuples
+    """
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def throttled_search(query: str, metadata: dict) -> tuple[str, list[dict], dict]:
+        """Execute a single search with rate limiting"""
+        async with semaphore:
+            try:
+                loop = asyncio.get_event_loop()
+
+                if search_api == "serper":
+                    search_results = await loop.run_in_executor(
+                        None,
+                        lambda: serper_client.search(query=query, max_results=max_results)
+                    )
+                    results_list = search_results.get("results", [])[:max_results]
+
+                    # Small delay for Serper to respect rate limits
+                    await asyncio.sleep(0.3)
+                else:  # tavily
+                    search_results = await loop.run_in_executor(
+                        None,
+                        lambda: tavily_client.search(query=query, max_results=max_results)
+                    )
+                    results_list = search_results.get("results", [])[:max_results]
+
+                    # Smaller delay for Tavily (more permissive rate limits)
+                    await asyncio.sleep(0.1)
+
+                return (query, results_list, metadata)
+
+            except Exception as e:
+                print(f"    Search failed for '{query[:60]}...': {e}")
+                return (query, [], metadata)
+
+    # Execute all searches in parallel with rate limiting
+    tasks = [throttled_search(query, meta) for query, meta in queries]
+    results = await asyncio.gather(*tasks)
+
+    return results
 
 
 # ============================================================================
@@ -205,9 +360,19 @@ async def initial_broad_search(state: SubResearcherGraphState) -> dict:
         print(f"[DEPTH 1: Initial Search] Initial search failed: {e}")
         search_results_list = []
 
+    # Early quality filtering - filter by domain quality BEFORE processing
+    initial_count = len(search_results_list)
+    search_results_list = filter_results_by_domain_quality(search_results_list, min_score=0.5)
+    filtered_count = len(search_results_list)
+
+    if filtered_count < initial_count:
+        print(f"[DEPTH 1: Initial Search] Early filtering: {initial_count} → {filtered_count} sources (removed {initial_count - filtered_count} low-quality domains)")
+
     # Store initial results with relevance scores
     initial_results = {}
     relevance_scores = {}
+    initial_domain_scores = {}  # Track domain quality scores
+
     for idx, result in enumerate(search_results_list):
         source_url = result.get("url", "")
         source_title = result.get("title", "Untitled")
@@ -217,6 +382,9 @@ async def initial_broad_search(state: SubResearcherGraphState) -> dict:
         if source_content:
             source_key = f"{source_title} ({source_url})"
             initial_results[source_key] = source_content
+
+            # Store domain quality for later use
+            initial_domain_scores[source_key] = quick_domain_quality_score(source_url)
 
             # Relevance: Use search score if available, otherwise use position (earlier = more relevant)
             if search_score > 0:
@@ -244,10 +412,9 @@ async def initial_broad_search(state: SubResearcherGraphState) -> dict:
 
 async def execute_targeted_searches(state: SubResearcherGraphState) -> dict:
     """
-    Step 3: Execute targeted searches from research plan.
+    Step 3: Execute targeted searches from research plan with PARALLEL EXECUTION.
 
-    Instead of extracting entities from results, we use the pre-planned
-    targeted searches based on subtopics and key questions.
+    IMPROVEMENT #3: Uses parallel_search_with_rate_limit for faster, rate-limited searches.
     """
     research_plan = state.get("research_plan", [])
     search_api = state.get("search_api", "tavily")
@@ -262,54 +429,58 @@ async def execute_targeted_searches(state: SubResearcherGraphState) -> dict:
         print(f"[DEPTH 1→2: Targeted Searches] Skipping (max_depth={max_depth}, targeted={len(targeted_searches)})")
         return {"entities": []}
 
-    print(f"[DEPTH 1→2: Targeted Searches] Executing {len(targeted_searches)} planned searches...")
+    print(f"[DEPTH 1→2: Targeted Searches] Executing {len(targeted_searches)} searches in PARALLEL...")
 
-    # Execute each targeted search
+    # IMPROVEMENT #3: Execute all searches in parallel with rate limiting
+    # Prepare queries with metadata
+    queries_with_meta = [
+        (search_spec.get("query", ""), {"priority": search_spec.get("priority", "medium"), "index": idx})
+        for idx, search_spec in enumerate(targeted_searches)
+    ]
+
+    # Execute parallel searches with semaphore-based rate limiting
+    # Serper: max 3 concurrent, Tavily: max 5 concurrent
+    max_concurrent = 3 if search_api == "serper" else 5
+    search_results = await parallel_search_with_rate_limit(
+        queries=queries_with_meta,
+        search_api=search_api,
+        max_results=max_results,
+        max_concurrent=max_concurrent
+    )
+
+    # Process results with early quality filtering
     all_targeted_results = {}
     relevance_scores = state.get("source_relevance_scores", {}).copy()
+    total_before_filter = 0
+    total_after_filter = 0
 
-    for idx, search_spec in enumerate(targeted_searches):
-        query = search_spec.get("query", "")
-        priority = search_spec.get("priority", "medium")
+    for query, results_list, metadata in search_results:
+        priority = metadata.get("priority", "medium")
+        print(f"  [{priority.upper()}] {query[:80]}... → {len(results_list)} results")
 
-        print(f"  [{priority.upper()}] {query[:80]}...")
+        # IMPROVEMENT #2: Early quality filtering
+        total_before_filter += len(results_list)
+        results_list = filter_results_by_domain_quality(results_list, min_score=0.3)
+        total_after_filter += len(results_list)
 
-        try:
-            if search_api == "serper":
-                loop = asyncio.get_event_loop()
-                search_results = await loop.run_in_executor(
-                    None,
-                    lambda: serper_client.search(query=query, max_results=max_results)
-                )
-                results_list = search_results.get("results", [])[:max_results]
-            else:  # tavily
-                loop = asyncio.get_event_loop()
-                search_results = await loop.run_in_executor(
-                    None,
-                    lambda: tavily_client.search(query=query, max_results=max_results)
-                )
-                results_list = search_results.get("results", [])[:max_results]
+        # Store filtered results
+        for result_idx, result in enumerate(results_list):
+            source_url = result.get("url", "")
+            source_title = result.get("title", "Untitled")
+            source_content = result.get("content", "")
 
-            # Store results
-            for result_idx, result in enumerate(results_list):
-                source_url = result.get("url", "")
-                source_title = result.get("title", "Untitled")
-                source_content = result.get("content", "")
+            if source_content:
+                source_key = f"{source_title} ({source_url})" if source_url else source_title
+                all_targeted_results[source_key] = source_content
 
-                if source_content:
-                    source_key = f"{source_title} ({source_url})" if source_url else source_title
-                    all_targeted_results[source_key] = source_content
+                # Higher relevance for high-priority searches
+                base_relevance = 0.8 if priority == "high" else 0.6
+                relevance_scores[source_key] = base_relevance - (result_idx * 0.1)
 
-                    # Higher relevance for high-priority searches
-                    base_relevance = 0.8 if priority == "high" else 0.6
-                    relevance_scores[source_key] = base_relevance - (result_idx * 0.1)
+    if total_before_filter > total_after_filter:
+        print(f"[DEPTH 1→2: Targeted Searches] Early filtering: {total_before_filter} → {total_after_filter} sources (removed {total_before_filter - total_after_filter})")
 
-            print(f"    Found {len(results_list)} sources")
-
-        except Exception as e:
-            print(f"    Search failed: {e}")
-
-    print(f"[DEPTH 1→2: Targeted Searches] Total: {len(all_targeted_results)} new sources")
+    print(f"[DEPTH 1→2: Targeted Searches] Total: {len(all_targeted_results)} unique sources from parallel searches")
 
     # Merge with existing results
     combined_results = state.get("research_results", {}).copy()
@@ -342,8 +513,9 @@ async def deep_research_entities(state: SubResearcherGraphState) -> dict:
     print(f"[Subresearcher] Deep research on {len(entities)} entities with parallel search strategies...")
 
     async def search_academic(entity: str):
-        """Search academic sources for entity"""
-        academic_query = f"{entity} {main_topic} site:edu OR site:scholar.google.com OR site:arxiv.org OR site:researchgate.net"
+        """Search academic/research sources for entity"""
+        # Trust search API's ranking - no site restrictions
+        academic_query = f"{entity} {main_topic} academic research papers"
         try:
             if search_api == "serper":
                 loop = asyncio.get_event_loop()
@@ -366,7 +538,8 @@ async def deep_research_entities(state: SubResearcherGraphState) -> dict:
 
     async def search_news(entity: str):
         """Search news sources for entity"""
-        news_query = f"{entity} {main_topic} site:bbc.com OR site:reuters.com OR site:nytimes.com OR site:theguardian.com OR site:cnn.com"
+        # Trust search API's ranking - no site restrictions
+        news_query = f"{entity} {main_topic} latest news updates"
         try:
             if search_api == "serper":
                 loop = asyncio.get_event_loop()
@@ -483,6 +656,277 @@ async def deep_research_entities(state: SubResearcherGraphState) -> dict:
         "research_results": combined_results,
         "source_relevance_scores": combined_relevance,
         "research_depth": 2  # We went deeper
+    }
+
+
+async def assess_coverage_and_gaps(state: SubResearcherGraphState) -> dict:
+    """
+    DYNAMIC DEEPENING: Analyze research coverage and discover gaps/entities.
+
+    After initial research, this node:
+    1. Extracts entities/topics mentioned in results
+    2. Identifies knowledge gaps (questions raised but not answered)
+    3. Estimates coverage score
+    4. Decides if deeper research is needed
+    """
+    research_results = state.get("research_results", {})
+    section_subtopics = state.get("section_subtopics", [])
+    research_depth = state.get("research_depth", 1)
+    max_depth = state.get("max_research_depth", 3)
+    main_topic = state.get("main_topic", "")
+    section_title = state.get("subtopic", "")
+
+    if not research_results or research_depth >= max_depth:
+        print(f"[COVERAGE ASSESSMENT] Skipping (depth={research_depth}/{max_depth}, results={len(research_results)})")
+        return {
+            "coverage_score": 1.0,
+            "needs_deepening": False,
+            "discovered_gaps": [],
+            "discovered_entities": []
+        }
+
+    print(f"[COVERAGE ASSESSMENT] Analyzing {len(research_results)} sources for gaps and entities...")
+
+    # Combine all research content for analysis - use MORE sources and MORE content per source
+    # Sort by relevance/credibility if available, otherwise use all sources
+    all_sources = list(research_results.items())
+    
+    # Use up to 25 sources (instead of 10) and up to 1500 chars per source (instead of 500)
+    # This gives much better coverage understanding
+    num_sources_to_analyze = min(25, len(all_sources))
+    combined_content = "\n\n".join([
+        f"Source: {k}\n{v[:1500]}" 
+        for k, v in all_sources[:num_sources_to_analyze]
+    ])
+
+    # Use LLM to analyze coverage
+    CoverageAnalysis = create_model(
+        'CoverageAnalysis',
+        coverage_score=(float, ...),  # 0.0-1.0
+        discovered_entities=(list[str], ...),  # Important entities/topics mentioned
+        knowledge_gaps=(list[str], ...),  # Questions raised but not answered
+        needs_deeper_research=(bool, ...),  # Should we go deeper?
+        reasoning=(str, ...)
+    )
+
+    llm_structured = llm.with_structured_output(CoverageAnalysis)
+
+    analysis_prompt = f"""Analyze research coverage and identify gaps for deeper investigation.
+
+TOPIC: {main_topic}
+SECTION: {section_title}
+EXPECTED SUBTOPICS: {', '.join(section_subtopics[:5])}
+
+RESEARCH SO FAR:
+{combined_content[:8000]}
+
+ANALYZE:
+1. **Coverage Score** (0.0-1.0): How well does this research cover the expected subtopics?
+   - 1.0 = Comprehensive, all subtopics well-covered with specific examples, data, and details
+   - 0.8-0.9 = Good coverage, most subtopics addressed with some specifics
+   - 0.6-0.7 = Adequate coverage, subtopics mentioned but lacking depth/specifics
+   - 0.4-0.5 = Partial coverage, major gaps exist, missing key details/examples
+   - 0.0-0.3 = Minimal coverage, mostly off-topic or very superficial
+   - BE STRICT: Coverage requires SPECIFIC examples, data points, and detailed explanations, not just general statements
+
+2. **Discovered Entities**: Extract 3-5 SPECIFIC, RESEARCHABLE entities mentioned that warrant deeper investigation:
+   - Focus on: Specific studies, research papers, named methodologies, key researchers, specific techniques/exercises
+   - AVOID: Generic organizations (unless central to topic), brand names, websites, unless they represent key concepts
+   - Only include entities that are:
+     a) Directly relevant to the main topic AND comparison
+     b) Will yield NEW information when researched (not just general info)
+     c) Specific enough to generate targeted search results
+   - Example for "powerlifting vs Olympic lifting": ["snatch technique", "squat biomechanics", "periodization models"]
+   - NOT: ["USA Weightlifting", "Westside Barbell", "Barbell Medicine"] (these are organizations, not researchable concepts)
+   - Prefer: Specific techniques, studies, methodologies, or key concepts that need deeper investigation
+
+3. **Knowledge Gaps**: Identify 2-4 specific, ACTIONABLE search queries (not questions):
+   - Convert questions into search-friendly queries
+   - Focus on missing data, statistics, or specific comparisons
+   - Make queries specific enough to find targeted information
+   - Example: Instead of "What are the exact player counts?" use "powerlifting Olympic lifting player statistics 2024"
+   - Example: Instead of "How do retention rates compare?" use "powerlifting vs Olympic lifting injury rates statistics comparison"
+   - Format as search queries, not questions
+
+4. **Needs Deeper Research**: Should we do another research round?
+   - TRUE if: coverage < 0.75 OR significant gaps exist OR important entities need investigation OR missing specific data/statistics
+   - FALSE if: coverage >= 0.75 AND all subtopics well-addressed AND sufficient specific examples/data present
+   - Be STRICT: Coverage of 0.5-0.7 means significant gaps still exist and more research is needed
+
+5. **Reasoning**: Brief explanation (1-2 sentences)
+
+Return structured output.
+"""
+
+    try:
+        messages = [
+            SystemMessage(content="You are a research coverage analyst. Identify gaps and entities for deeper investigation."),
+            HumanMessage(content=analysis_prompt)
+        ]
+
+        response = await llm_structured.ainvoke(messages)
+
+        # Limit entities to top 5 (quality over quantity)
+        discovered_entities = response.discovered_entities[:5]
+        knowledge_gaps = response.knowledge_gaps[:4]
+
+        print(f"[COVERAGE ASSESSMENT] Results:")
+        print(f"  Coverage score: {response.coverage_score:.2f}")
+        print(f"  Needs deepening: {response.needs_deeper_research}")
+        if discovered_entities:
+            print(f"  Discovered entities ({len(discovered_entities)}): {', '.join(discovered_entities)}")
+        if knowledge_gaps:
+            print(f"  Knowledge gaps ({len(knowledge_gaps)}):")
+            for gap in knowledge_gaps:
+                print(f"    - {gap[:80]}")
+        print(f"  Reasoning: {response.reasoning}")
+
+        return {
+            "coverage_score": response.coverage_score,
+            "needs_deepening": response.needs_deeper_research and research_depth < max_depth,
+            "discovered_gaps": knowledge_gaps,
+            "discovered_entities": discovered_entities
+        }
+
+    except Exception as e:
+        print(f"[COVERAGE ASSESSMENT] Analysis failed: {e}")
+        # Conservative fallback: assume decent coverage, don't deepen
+        return {
+            "coverage_score": 0.7,
+            "needs_deepening": False,
+            "discovered_gaps": [],
+            "discovered_entities": []
+        }
+
+
+async def deep_dive_research(state: SubResearcherGraphState) -> dict:
+    """
+    DYNAMIC DEEPENING: Execute additional research based on discovered gaps/entities.
+
+    This runs AFTER assess_coverage_and_gaps and performs targeted searches for:
+    1. Discovered entities (specific items that need investigation)
+    2. Knowledge gaps (unanswered questions)
+
+    CROSS-SECTION LEARNING: Checks shared_research_pool first to avoid redundant research.
+    """
+    discovered_entities = state.get("discovered_entities", [])
+    knowledge_gaps = state.get("discovered_gaps", [])
+    search_api = state.get("search_api", "tavily")
+    max_results = state.get("max_search_results", 3)
+    main_topic = state.get("main_topic", "")
+    shared_pool = state.get("shared_research_pool", {})
+
+    if not discovered_entities and not knowledge_gaps:
+        print(f"[DEEP DIVE] No gaps or entities to research")
+        return {}
+
+    # CHECK SHARED POOL: Filter out entities already researched by other sections
+    already_researched = shared_pool.get("researched_entities", {})
+    new_entities = []
+    reused_entities = []
+
+    for entity in discovered_entities:
+        if entity in already_researched:
+            reused_entities.append(entity)
+        else:
+            new_entities.append(entity)
+
+    if reused_entities:
+        print(f"[DEEP DIVE - SHARED POOL] Reusing research for {len(reused_entities)} entities: {', '.join(reused_entities[:3])}")
+
+    if new_entities:
+        print(f"[DEEP DIVE] Researching {len(new_entities)} NEW entities + {len(knowledge_gaps)} gaps...")
+    elif knowledge_gaps:
+        print(f"[DEEP DIVE] Researching {len(knowledge_gaps)} gaps (all entities already researched)...")
+    else:
+        print(f"[DEEP DIVE] All entities already researched, no gaps to fill")
+        return {}
+
+    discovered_entities = new_entities  # Only research new entities
+
+    # Build queries for parallel execution
+    queries_with_meta = []
+
+    # Add entity-specific queries - make them more specific and actionable
+    for entity in discovered_entities:
+        # Filter out low-value entities:
+        # - Skip very long names (likely not useful)
+        # - Skip organization/brand names (unless they're key concepts)
+        # - Skip generic terms
+        entity_lower = entity.lower()
+        skip_indicators = [
+            len(entity.split()) > 4,  # Too long
+            any(word in entity_lower for word in ["inc", "llc", "company", "organization", "association"]),
+            entity_lower in ["usa weightlifting", "barbell medicine", "westside barbell", "elitefts"]  # Common orgs
+        ]
+        
+        if any(skip_indicators):
+            continue
+            
+        # Create more specific query that focuses on the comparison aspect
+        query = f"{entity} {main_topic} comparison differences statistics"
+        queries_with_meta.append((query, {"type": "entity", "subject": entity, "priority": "high"}))
+
+    # Add gap-filling queries - ensure they're search-friendly
+    for gap in knowledge_gaps:
+        # If gap is already a search query (no question mark, action-oriented), use it directly
+        # Otherwise, convert question to search query
+        if "?" in gap:
+            # Convert question to search query: remove question words, make it action-oriented
+            query = gap.replace("What", "").replace("How", "").replace("Are there", "").replace("?", "").strip()
+            query = f"{query} {main_topic}" if main_topic not in query else query
+        else:
+            query = gap if len(gap) > 15 else f"{gap} {main_topic}"
+        queries_with_meta.append((query, {"type": "gap", "subject": gap, "priority": "medium"}))
+
+    # Execute all deep dive searches in parallel
+    max_concurrent = 3 if search_api == "serper" else 5
+    search_results = await parallel_search_with_rate_limit(
+        queries=queries_with_meta,
+        search_api=search_api,
+        max_results=max_results,
+        max_concurrent=max_concurrent
+    )
+
+    # Process results with early quality filtering
+    deep_dive_results = {}
+    relevance_scores = state.get("source_relevance_scores", {}).copy()
+
+    for query, results_list, metadata in search_results:
+        search_type = metadata.get("type", "unknown")
+        priority = metadata.get("priority", "medium")
+        subject = metadata.get("subject", "")[:30]
+
+        print(f"  [{search_type.upper()}] {subject}... → {len(results_list)} results")
+
+        # Early quality filtering
+        results_list = filter_results_by_domain_quality(results_list, min_score=0.3)
+
+        # Store filtered results
+        for result_idx, result in enumerate(results_list):
+            source_url = result.get("url", "")
+            source_title = result.get("title", "Untitled")
+            source_content = result.get("content", "")
+
+            if source_content:
+                source_key = f"{source_title} ({source_url})" if source_url else source_title
+                deep_dive_results[source_key] = source_content
+
+                # High relevance for entity searches, medium for gap fills
+                base_relevance = 0.85 if search_type == "entity" else 0.7
+                relevance_scores[source_key] = base_relevance - (result_idx * 0.05)
+
+    print(f"[DEEP DIVE] Found {len(deep_dive_results)} new sources from deep dive")
+
+    # Merge with existing results
+    combined_results = state.get("research_results", {}).copy()
+    combined_results.update(deep_dive_results)
+
+    return {
+        "research_results": combined_results,
+        "source_relevance_scores": relevance_scores,
+        "research_depth": state.get("research_depth", 1) + 1,  # Increment depth
+        "entities": []  # Clear entities to avoid legacy entity research
     }
 
 
@@ -648,17 +1092,43 @@ async def fetch_full_content_for_top_sources(state: SubResearcherGraphState) -> 
 # GRAPH CREATION
 # ============================================================================
 
+def should_deepen_research(state: SubResearcherGraphState) -> str:
+    """
+    Routing function: Decide if we need another round of deep dive research.
+
+    Returns:
+        "deepen" - Coverage is low, do deep dive research
+        "finish" - Coverage is good, proceed to quality assessment
+    """
+    needs_deepening = state.get("needs_deepening", False)
+    research_depth = state.get("research_depth", 1)
+    max_depth = state.get("max_research_depth", 3)
+
+    if needs_deepening and research_depth < max_depth:
+        return "deepen"
+    else:
+        return "finish"
+
+
 def create_subresearcher_graph():
     """
-    Create the subresearcher graph with smart research planning + targeted searches.
+    Create the subresearcher graph with DYNAMIC DEEPENING.
 
     Flow:
-    1. plan_research_strategy: Analyze subtopics/questions and create research plan
-    2. initial_broad_search: Execute primary search from plan
-    3. execute_targeted_searches: Execute targeted searches based on plan
-    4. deep_research_entities: (Legacy) Research entities if extracted
-    5. assess_quality: Filter and score sources
-    6. fetch_full_content: Fetch full articles for top sources via Firecrawl
+    1. plan_research_strategy: Create initial research plan from outline
+    2. initial_broad_search: Execute primary search
+    3. execute_targeted_searches: Execute planned targeted searches
+    4. assess_coverage_and_gaps: **NEW** Analyze coverage, discover entities/gaps
+    5. Routing decision:
+       - If coverage low OR important entities discovered → deep_dive_research (go to step 6)
+       - If coverage good → assess_quality (skip to step 7)
+    6. deep_dive_research: **NEW** Research discovered entities and fill gaps
+       → Loop back to assess_coverage_and_gaps (iterative deepening)
+    7. assess_quality: Filter and score final sources
+    8. fetch_full_content: Fetch full articles for top sources
+
+    The graph can loop through steps 4-6 multiple times until max_depth is reached
+    or coverage is satisfactory.
     """
     workflow = StateGraph(SubResearcherGraphState)
 
@@ -666,16 +1136,33 @@ def create_subresearcher_graph():
     workflow.add_node("plan_research", plan_research_strategy)
     workflow.add_node("initial_broad_search", initial_broad_search)
     workflow.add_node("targeted_searches", execute_targeted_searches)
-    workflow.add_node("deep_research_entities", deep_research_entities)
+    workflow.add_node("assess_coverage", assess_coverage_and_gaps)  # NEW: Dynamic analysis
+    workflow.add_node("deep_dive", deep_dive_research)              # NEW: Adaptive research
     workflow.add_node("assess_quality", assess_quality)
     workflow.add_node("fetch_full_content", fetch_full_content_for_top_sources)
 
-    # New flow with research planning
+    # Initial research flow
     workflow.set_entry_point("plan_research")
     workflow.add_edge("plan_research", "initial_broad_search")
     workflow.add_edge("initial_broad_search", "targeted_searches")
-    workflow.add_edge("targeted_searches", "deep_research_entities")
-    workflow.add_edge("deep_research_entities", "assess_quality")
+
+    # DYNAMIC DEEPENING: After targeted searches, assess coverage
+    workflow.add_edge("targeted_searches", "assess_coverage")
+
+    # Routing: Either deepen or finish
+    workflow.add_conditional_edges(
+        "assess_coverage",
+        should_deepen_research,
+        {
+            "deepen": "deep_dive",      # Coverage low → research more
+            "finish": "assess_quality"  # Coverage good → finish
+        }
+    )
+
+    # ITERATIVE LOOP: After deep dive, re-assess coverage (may trigger another round)
+    workflow.add_edge("deep_dive", "assess_coverage")
+
+    # Final steps
     workflow.add_edge("assess_quality", "fetch_full_content")
     workflow.add_edge("fetch_full_content", END)
 

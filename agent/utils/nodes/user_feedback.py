@@ -10,7 +10,6 @@ def display_final_report(state: dict) -> dict:
     This is a separate node to ensure the report is shown before the feedback prompt.
     """
     report_content = state.get("report_content", "")
-    final_score = state.get("final_score", 0)
 
     print(f"display_final_report: report_content: {report_content}")
 

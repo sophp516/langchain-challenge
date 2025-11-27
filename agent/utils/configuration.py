@@ -31,7 +31,7 @@ class AgentConfig(BaseModel):
     )
 
     max_clarification_rounds: int = Field(
-        default=0,  # TESTING: Disabled clarification to test core flow
+        default=0,
         ge=0,
         le=10,
         description="Maximum number of clarification questions (0-10)"
@@ -41,13 +41,7 @@ class AgentConfig(BaseModel):
         default=1,
         ge=0,
         le=5,
-        description="Maximum number of report revision attempts"
-    )
-
-    # User feedback settings
-    enable_user_feedback: bool = Field(
-        default=True,
-        description="Whether to collect user feedback on the report"
+        description="Maximum number of report revision attempt"
     )
 
     # Cross-reference verification
@@ -86,7 +80,6 @@ def get_config_from_configurable(configurable: dict) -> AgentConfig:
     config_keys = AgentConfig.model_fields.keys()
     config_dict = {k: v for k, v in configurable.items() if k in config_keys}
     return AgentConfig(**config_dict)
-
 
 
 try:

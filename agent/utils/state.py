@@ -58,3 +58,6 @@ class UnifiedAgentState(TypedDict):
     # Intent routing fields
     user_intent: str  # "new_research", "retrieve_report", or "list_reports"
     intent_report_id: str  # Extracted report ID from user query
+
+    # Shared knowledge pool for cross-section learning
+    shared_research_pool: dict  # Shared entities, search results, and findings across all sections

@@ -37,7 +37,8 @@ def create_agent(use_checkpointer=False):
     workflow.add_node("collect_response", collect_user_response)
 
     # Research Workflow Nodes
-    workflow.add_node("research_outline_and_write", research_outline_and_write)  # MERGED: generate_subtopics + verify + outline + write
+    workflow.add_node("write_outline", write_outline)
+    workflow.add_node("research_and_write", research_and_write)
 
     # User Feedback Nodes (after full report is generated)
     workflow.add_node("display_report", display_final_report)
@@ -69,7 +70,7 @@ def create_agent(use_checkpointer=False):
         "check_initial_context",
         route_after_initial_check,
         {
-            "continue": "research_outline_and_write",
+            "continue": "write_outline",
             "ask_clarification": "generate_clarification"
         }
     )
@@ -80,7 +81,7 @@ def create_agent(use_checkpointer=False):
         "generate_clarification",
         route_after_initial_check,  # checks is_finalized
         {
-            "continue": "research_outline_and_write",  # LLM said ENOUGH_CONTEXT
+            "continue": "write_outline",  # LLM said ENOUGH_CONTEXT
             "ask_clarification": "collect_response"  # Need user input
         }
     )
@@ -88,33 +89,9 @@ def create_agent(use_checkpointer=False):
     workflow.add_edge("collect_response", "generate_clarification")
 
     # Research Flow
-    workflow.add_edge("research_outline_and_write", "evaluate_report")
-    workflow.add_edge("evaluate_report", "display_report")
-
-
-    # Display report first, then conditionally prompt for feedback (or skip to END)
-    workflow.add_conditional_edges(
-        "display_report",
-        route_after_display_report,
-        {
-            "prompt_for_feedback": "prompt_for_feedback",
-            "finalize": END
-        }
-    )
-    workflow.add_edge("prompt_for_feedback", "collect_feedback")
-
-    # User Feedback Loop (after LLM evaluation passes)
-    workflow.add_conditional_edges(
-        "collect_feedback",
-        route_after_feedback,
-        {
-            "incorporate": "incorporate_feedback",
-            "finalize": END
-        }
-    )
-
-    # After incorporating feedback, collect more feedback or end
-    workflow.add_edge("incorporate_feedback", "prompt_for_feedback")
+    workflow.add_edge("write_outline", "research_and_write")
+    workflow.add_edge("research_and_write", "evaluate_report")
+    workflow.add_edge("evaluate_report", END)
 
     if use_checkpointer:
         memory = MemorySaver()
