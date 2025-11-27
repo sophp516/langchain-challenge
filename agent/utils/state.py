@@ -23,6 +23,7 @@ class UnifiedAgentState(TypedDict):
     clarification_rounds: int
     clarification_questions: list[str]
     user_responses: list[str]
+    pending_clarification_question: str  # OPTIMIZATION: Pre-generated question from check_initial_context
 
     # SubtopicGenerationState fields (added by transformation node)
     subtopics: list[str]

@@ -1,7 +1,6 @@
 from utils.nodes.tools import *
 from utils.nodes.helpers import *
 from utils.nodes.user_intent import *
-from utils.nodes.user_feedback import *
 from utils.nodes.writing import *
 from utils.edges import *
 from utils.state import UnifiedAgentState
@@ -31,20 +30,14 @@ def create_agent(use_checkpointer=False):
     workflow.add_node("check_user_intent", check_user_intent)
     workflow.add_node("execute_and_format_tools", execute_and_format_tools)  # OPTIMIZED: creates tool call + executes + formats in one node
 
-    # Topic Inquiry Nodes
+    # Topic Inquiry Nodes (OPTIMIZED: single LLM call for evaluation + question generation)
     workflow.add_node("check_initial_context", check_initial_context)
-    workflow.add_node("generate_clarification", generate_clarification_question)
+    workflow.add_node("ask_clarification", generate_clarification_question)
     workflow.add_node("collect_response", collect_user_response)
 
     # Research Workflow Nodes
     workflow.add_node("write_outline", write_outline)
     workflow.add_node("research_and_write", research_and_write)
-
-    # User Feedback Nodes (after full report is generated)
-    workflow.add_node("display_report", display_final_report)
-    workflow.add_node("prompt_for_feedback", prompt_for_feedback)
-    workflow.add_node("collect_feedback", collect_user_feedback)
-    workflow.add_node("incorporate_feedback", incorporate_feedback)
 
     # Evaluation Nodes (after user is satisfied)
     workflow.add_node("evaluate_report", evaluate_report)
@@ -65,28 +58,22 @@ def create_agent(use_checkpointer=False):
     # Tool Flow: execute_and_format_tools does everything in one node, then END
     workflow.add_edge("execute_and_format_tools", END)
 
-    # Topic Inquiry Flow
+    # Topic Inquiry Flow - OPTIMIZED: check_initial_context does evaluation + question generation in ONE LLM call
     workflow.add_conditional_edges(
         "check_initial_context",
         route_after_initial_check,
         {
-            "continue": "write_outline",
-            "ask_clarification": "generate_clarification"
+            "continue": "write_outline",                  # Sufficient context - proceed to research
+            "ask_clarification": "ask_clarification" # Need more info - use pre-generated question
         }
     )
 
-    # Clarification loop
-    # generate_clarification checks if enough context, routes accordingly
-    workflow.add_conditional_edges(
-        "generate_clarification",
-        route_after_initial_check,  # checks is_finalized
-        {
-            "continue": "write_outline",  # LLM said ENOUGH_CONTEXT
-            "ask_clarification": "collect_response"  # Need user input
-        }
-    )
-    # After collecting user response, go back to generate_clarification to validate
-    workflow.add_edge("collect_response", "generate_clarification")
+    # generate_clarification adds pre-generated question to messages, then collects response
+    workflow.add_edge("ask_clarification", "collect_response")
+
+    # After collecting user response, go back to check_initial_context to re-evaluate
+    # check_initial_context -> generate_clarification -> collect_response -> check_initial_context
+    workflow.add_edge("collect_response", "check_initial_context")
 
     # Research Flow
     workflow.add_edge("write_outline", "research_and_write")

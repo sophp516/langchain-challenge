@@ -1,10 +1,11 @@
 from langgraph.types import RunnableConfig
 from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
 from utils.model import llm, llm_quality
-from utils.configuration import get_config_from_configurable, tavily_client, serper_client
+from utils.configuration import get_config_from_configurable, tavily_client
 from utils.subresearcher import subresearcher_graph
 from utils.db import save_report
 from .helpers import format_source_as_markdown_link
+from pydantic import create_model
 import re, json, asyncio, uuid
 
 
@@ -14,21 +15,14 @@ async def search_for_section_sources(section_title: str, topic: str, search_api:
     """
     Perform a web search to find additional sources for a section.
     Used when existing research doesn't provide enough sources.
-    Respects the configured search API (tavily or serper).
+    Respects the configured search API
     """
     search_query = f"{section_title}"
     print(f"    Searching for additional sources: '{search_query[:50]}...'")
 
     try:
         loop = asyncio.get_event_loop()
-        if search_api == "serper":
-            search_results = await loop.run_in_executor(
-                None,
-                lambda: serper_client.search(query=search_query, max_results=num_results)
-            )
-            # SerperClient returns Tavily-compatible format
-            return search_results.get("results", [])
-        else:
+        if search_api == "tavily":
             search_results = await loop.run_in_executor(
                 None,
                 lambda: tavily_client.search(query=search_query, max_results=num_results)
@@ -47,7 +41,7 @@ async def write_single_section(
         all_sections: list = None,
         section_index: int = 0,
         previously_written_sections: list = None,
-        search_api: str = "serper"
+        search_api: str = "tavily"
 ) -> dict:
     """
     Write a single section of the report with citations.
@@ -330,20 +324,53 @@ async def write_single_section(
     is_executive_summary = "executive summary" in section_title.lower()
     is_conclusion = "conclusion" in section_title.lower() or "recommendations" in section_title.lower()
 
+    # For Executive Summary, also generate a refined report title
     if is_executive_summary:
         section_prompt += "\n\n**EXECUTIVE SUMMARY REQUIREMENTS:**\n- Provide a concise, high-level overview of the entire report\n- Highlight the most important findings and conclusions\n- Summarize key insights from all sections\n- Keep it brief but comprehensive (2-3 paragraphs)\n- Write for a busy executive audience - clear and impactful"
+
+        # Use structured output to get both title and content
+        ReportWithTitle = create_model(
+            'ReportWithTitle',
+            report_title=(str, ...),  # Professional, refined title for the entire report
+            content=(str, ...)  # Executive summary content
+        )
+        llm_with_title = llm_quality.with_structured_output(ReportWithTitle)
+
+        section_prompt += f"\n\n**REPORT TITLE GENERATION:**\n- Also provide a professional, refined title for the ENTIRE REPORT (not just this section)\n- The report is about: \"{topic}\"\n- Make it clear, specific, and professional\n- Example: If topic is \"MMORPG games 2025\", title could be \"State of MMORPGs in 2025: Market Analysis and Player Trends\"\n- Return in 'report_title' field"
+
+        messages = [
+            SystemMessage(
+                content="You are an expert research report writer. CRITICAL: You MUST only write information that explicitly appears in the provided sources. DO NOT use your knowledge to add facts, names, dates, or statistics. Every factual claim must be directly traceable to a source. Hallucination is unacceptable. Additionally, focus on writing high-quality, well-structured content that excels in coverage, evidence, structure, and clarity."),
+            HumanMessage(content=section_prompt)
+        ]
+
+        response = await llm_with_title.ainvoke(messages)
+        section_content = response.content
+        generated_title = response.report_title
+
     elif is_conclusion:
         section_prompt += "\n\n**CONCLUSION REQUIREMENTS:**\n- Synthesize findings from all sections\n- Draw clear, evidence-based conclusions\n- Provide actionable recommendations when applicable\n- Connect back to the research objectives\n- End with forward-looking statements or implications"
 
-    messages = [
-        SystemMessage(
-            content="You are an expert research report writer. CRITICAL: You MUST only write information that explicitly appears in the provided sources. DO NOT use your knowledge to add facts, names, dates, or statistics. Every factual claim must be directly traceable to a source. Hallucination is unacceptable. Additionally, focus on writing high-quality, well-structured content that excels in coverage, evidence, structure, and clarity."),
-        HumanMessage(content=section_prompt)
-    ]
+        messages = [
+            SystemMessage(
+                content="You are an expert research report writer. CRITICAL: You MUST only write information that explicitly appears in the provided sources. DO NOT use your knowledge to add facts, names, dates, or statistics. Every factual claim must be directly traceable to a source. Hallucination is unacceptable. Additionally, focus on writing high-quality, well-structured content that excels in coverage, evidence, structure, and clarity."),
+            HumanMessage(content=section_prompt)
+        ]
 
+        response = await llm_quality.ainvoke(messages)
+        section_content = response.content if hasattr(response, 'content') else str(response)
+        generated_title = None
 
-    response = await llm_quality.ainvoke(messages)
-    section_content = response.content if hasattr(response, 'content') else str(response)
+    else:
+        messages = [
+            SystemMessage(
+                content="You are an expert research report writer. CRITICAL: You MUST only write information that explicitly appears in the provided sources. DO NOT use your knowledge to add facts, names, dates, or statistics. Every factual claim must be directly traceable to a source. Hallucination is unacceptable. Additionally, focus on writing high-quality, well-structured content that excels in coverage, evidence, structure, and clarity."),
+            HumanMessage(content=section_prompt)
+        ]
+
+        response = await llm_quality.ainvoke(messages)
+        section_content = response.content if hasattr(response, 'content') else str(response)
+        generated_title = None
 
     citations_in_content = re.findall(r'\[(\d+)\]', section_content)
     unique_citation_numbers = sorted(set(int(c) for c in citations_in_content))
@@ -356,13 +383,20 @@ async def write_single_section(
 
     print(f"      Citations: {len(sources_list)} sources available, {len(actually_cited_sources)} actually cited")
 
-    return {
+    result = {
         "title": section_title,
         "content": section_content,
         "sources": actually_cited_sources,  # Only sources actually used
         "all_available_sources": sources_list,
         "subtopics": section_subtopics
     }
+
+    # If this is Executive Summary, also return the generated report title
+    if is_executive_summary and generated_title:
+        result["report_title"] = generated_title
+        print(f"      Generated report title: {generated_title}")
+
+    return result
 
 
 async def write_sections_with_citations(state: dict, config: RunnableConfig) -> dict:
@@ -425,8 +459,19 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
 
     print(f"write_sections_with_citations: completed all {len(written_sections)} sections sequentially")
 
+    # Extract generated title from Executive Summary (if available)
+    generated_title = None
+    for section in written_sections:
+        if "report_title" in section:
+            generated_title = section["report_title"]
+            break
+
+    # Use generated title if available, otherwise fall back to raw topic
+    report_title = generated_title if generated_title else topic
+    print(f"write_sections_with_citations: Using report title: '{report_title}'")
+
     # Combine sections into full report
-    full_report = f"# {topic}\n\n"
+    full_report = f"# {report_title}\n\n"
     all_sources = []
 
     for section in written_sections:
@@ -451,9 +496,23 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
 
     new_version_id = state.get("version_id", 0) + 1
 
-    # Save report to MongoDB
+    # Save report to MongoDB with search results and metadata
     try:
-        await save_report(report_id, new_version_id, full_report)
+        await save_report(
+            report_id=report_id,
+            version_id=new_version_id,
+            full_report=full_report,
+            report_title=report_title,  # Save generated title
+            search_results=research_by_subtopic,  # Save all search results for revision context
+            report_sections=[
+                {
+                    "title": s.get("title"),
+                    "subtopics": s.get("subtopics"),
+                    "source_count": len(s.get("sources", []))
+                }
+                for s in written_sections
+            ]
+        )
         print(f"write_sections_with_citations: saved report {report_id} version {new_version_id} to MongoDB")
     except Exception as e:
         print(f"write_sections_with_citations: failed to save report to MongoDB: {e}")
@@ -488,8 +547,27 @@ async def research_sections(state: dict, config: RunnableConfig) -> dict:
         section_title = section.get("title", "")
         section_subtopics = section.get("subtopics", [])
 
+        # OPTIMIZATION: Extract pre-generated research plan from outline (if exists)
+        pregenerated_plan = section.get("research_plan", {})
+        research_plan = []
+        if pregenerated_plan:
+            primary_query = pregenerated_plan.get("primary_query", "")
+            targeted_searches = pregenerated_plan.get("targeted_searches", [])
+
+            if primary_query:
+                research_plan.append({"query": primary_query, "type": "primary"})
+
+            for ts in targeted_searches:
+                research_plan.append({
+                    "query": ts.get("query", ""),
+                    "type": "targeted",
+                    "priority": ts.get("priority", "medium")
+                })
+
         print(f"\n  === Researching section {idx + 1}/{len(sections)}: {section_title} ===")
         print(f"      Subtopics: {section_subtopics[:3]}")
+        if research_plan:
+            print(f"      Pre-generated plan: {len(research_plan)} searches")
 
         subgraph_state = {
             "subtopic_id": idx,
@@ -502,13 +580,11 @@ async def research_sections(state: dict, config: RunnableConfig) -> dict:
             "source_credibilities": {},
             "source_relevance_scores": {},
             "entities": [],
-            "research_plan": [],
+            "research_plan": research_plan,  # OPTIMIZATION: Pass pre-generated plan
             "completed_searches": 0,
             "max_search_results": agent_config.max_search_results,
             "max_research_depth": agent_config.max_research_depth,
             "search_api": agent_config.search_api,
-            "enable_mcp_fetch": agent_config.enable_mcp_fetch,
-            "max_mcp_fetches": agent_config.max_mcp_fetches
         }
 
         result = await subresearcher_graph.ainvoke(subgraph_state)
@@ -608,9 +684,21 @@ async def write_outline(state: dict, config: RunnableConfig) -> dict:
             {{
               "title": "Section Title",
               "subtopics": ["subtopic1", "subtopic2"],
+              "research_plan": {{
+                "primary_query": "main search query for this section",
+                "targeted_searches": [
+                  {{"query": "specific search 1", "priority": "high"}},
+                  {{"query": "specific search 2", "priority": "medium"}}
+                ]
+              }}
             }}
           ]
         }}
+
+        OPTIMIZATION: For each section, also provide a research_plan:
+        - primary_query: One broad search combining the topic + section title
+        - targeted_searches: 3-5 focused searches for the subtopics (with priority: high/medium/low)
+        - This saves an additional LLM call during research phase
         """
 
     messages = [
