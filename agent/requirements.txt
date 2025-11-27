@@ -9,3 +9,4 @@ grandalf
 langgraph-cli[inmem]
 pymongo
 pymongo[srv]
+firecrawl-py

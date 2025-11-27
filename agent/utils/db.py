@@ -31,17 +31,22 @@ else:
     test_data_collection = None
 
 
-# ============================================================================
-# REPORT VERSION CONTROL FUNCTIONS
-# ============================================================================
-
 
 async def save_report(
         report_id: str,
         version_id: int,
         full_report: str,
+        search_results: list[dict] = None
 ):
-    """Save report with corresponding report id and version_id"""
+    """
+    Save report with corresponding report id, version_id, and research data.
+
+    Args:
+        report_id: Unique identifier for the report
+        version_id: Version number of this report
+        full_report: The complete report content
+        search_results: List of subresearcher results with research data (optional)
+    """
     if not mongodb_enabled or reports_collection is None:
         print(f"MongoDB disabled - skipping save for report {report_id} version {version_id}")
         return None
@@ -52,6 +57,10 @@ async def save_report(
         "content": full_report,
         "created_at": datetime.datetime.utcnow(),
     }
+
+    # Add search results if provided
+    if search_results:
+        report_doc["search_results"] = search_results
 
     result = await reports_collection.insert_one(report_doc)
     return result.inserted_id
@@ -82,9 +91,6 @@ async def get_report_version(report_id: str, version_id: int):
     return report # None if not found
 
 
-# ============================================================================
-# TEST DATA COLLECTION FUNCTIONS
-# ============================================================================
 
 async def save_test_data(data: dict) -> str:
     """Save a single test data entry to the test-data collection"""
