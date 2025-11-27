@@ -1,4 +1,9 @@
-from utils.nodes import *
+from utils.nodes.tools import *
+from utils.nodes.helpers import *
+from utils.nodes.user_intent import *
+from utils.nodes.user_feedback import *
+from utils.nodes.writing import *
+from utils.edges import *
 from utils.state import UnifiedAgentState
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -14,11 +19,10 @@ def create_agent(use_checkpointer=False):
     2. If report tools: call tools -> execute -> format -> back to intent check
     3. If research: Topic inquiry + clarification
     4. Multi-layer research on subtopics
-    5. Cross-reference verification
-    6. Outline generation
-    7. Section-by-section writing (full report generated)
-    8. User feedback loop (with interrupt)
-    9. Incorporate feedback (if requested)
+    5. Outline generation
+    6. Section-by-section writing (full report generated)
+    7. User feedback loop (with interrupt)
+    8. Incorporate feedback (if requested)
     10. Finalize
     """
     workflow = StateGraph(UnifiedAgentState)

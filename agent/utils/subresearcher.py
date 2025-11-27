@@ -3,9 +3,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
 from pydantic import create_model
 from utils.model import llm
-from utils.configuration import tavily_client, serper_client
-from utils.verification import filter_quality_sources
-from utils.mcp_fetch import fetch_full_content
+from utils.configuration import tavily_client, serper_client, fetch_full_content
 import asyncio
 
 
