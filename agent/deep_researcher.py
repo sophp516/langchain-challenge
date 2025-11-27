@@ -11,19 +11,18 @@ from langgraph.checkpoint.memory import MemorySaver
 
 def create_agent(use_checkpointer=False):
     """
-    Create and compile the enhanced agent graph with intent routing, tool support,
-    cross-reference verification and user feedback.
+    Create and compile the enhanced agent graph with intent routing and tool support.
 
     Flow:
-    1. Check user intent (research vs report retrieval)
-    2. If report tools: call tools -> execute -> format -> back to intent check
+    1. Check user intent (research vs report retrieval/revision)
+    2. If report tools: call tools (get_report, list_reports, revise_report) -> execute -> format -> END
     3. If research: Topic inquiry + clarification
     4. Multi-layer research on subtopics
     5. Outline generation
     6. Section-by-section writing (full report generated)
-    7. User feedback loop (with interrupt)
-    8. Incorporate feedback (if requested)
-    10. Finalize
+    7. Display final report -> END
+
+    Note: Report revision is now handled via the revise_report tool instead of feedback loop
     """
     workflow = StateGraph(UnifiedAgentState)
 
@@ -39,13 +38,10 @@ def create_agent(use_checkpointer=False):
     # Research Workflow Nodes
     workflow.add_node("research_outline_and_write", research_outline_and_write)  # MERGED: generate_subtopics + verify + outline + write
 
-    # User Feedback Nodes (after full report is generated)
+    # Final Display Node
     workflow.add_node("display_report", display_final_report)
-    workflow.add_node("prompt_for_feedback", prompt_for_feedback)
-    workflow.add_node("collect_feedback", collect_user_feedback)
-    workflow.add_node("incorporate_feedback", incorporate_feedback)
 
-    # Evaluation Nodes (after user is satisfied)
+    # Evaluation Node (for quality scoring)
     workflow.add_node("evaluate_report", evaluate_report)
 
     # Entry Point - Intent Check
@@ -87,34 +83,10 @@ def create_agent(use_checkpointer=False):
     # After collecting user response, go back to generate_clarification to validate
     workflow.add_edge("collect_response", "generate_clarification")
 
-    # Research Flow
+    # Research Flow: research -> evaluate -> display -> END
     workflow.add_edge("research_outline_and_write", "evaluate_report")
     workflow.add_edge("evaluate_report", "display_report")
-
-
-    # Display report first, then conditionally prompt for feedback (or skip to END)
-    workflow.add_conditional_edges(
-        "display_report",
-        route_after_display_report,
-        {
-            "prompt_for_feedback": "prompt_for_feedback",
-            "finalize": END
-        }
-    )
-    workflow.add_edge("prompt_for_feedback", "collect_feedback")
-
-    # User Feedback Loop (after LLM evaluation passes)
-    workflow.add_conditional_edges(
-        "collect_feedback",
-        route_after_feedback,
-        {
-            "incorporate": "incorporate_feedback",
-            "finalize": END
-        }
-    )
-
-    # After incorporating feedback, collect more feedback or end
-    workflow.add_edge("incorporate_feedback", "prompt_for_feedback")
+    workflow.add_edge("display_report", END)
 
     if use_checkpointer:
         memory = MemorySaver()

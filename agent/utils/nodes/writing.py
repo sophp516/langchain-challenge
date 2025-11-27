@@ -595,10 +595,10 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
 
     new_version_id = state.get("version_id", 0) + 1
 
-    # Save report to MongoDB
+    # Save report to MongoDB with search results
     try:
-        await save_report(report_id, new_version_id, full_report)
-        print(f"write_sections_with_citations: saved report {report_id} version {new_version_id} to MongoDB")
+        await save_report(report_id, new_version_id, full_report, sub_researchers)
+        print(f"write_sections_with_citations: saved report {report_id} version {new_version_id} to MongoDB (with {len(sub_researchers)} search results)")
     except Exception as e:
         print(f"write_sections_with_citations: failed to save report to MongoDB: {e}")
 

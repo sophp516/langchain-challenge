@@ -160,11 +160,12 @@ except ImportError:
 class FirecrawlFetchClient:
     """Client for Firecrawl API to extract full article content"""
 
+    # TODO: Fix timeout issue for better success rate [low priority]
     def __init__(self):
         self.max_content_length = 10000  # Max chars per article (prevent token overflow)
         self.timeout_ms = 10000  # 10 second timeout (aggressive)
         self.skip_domains = [
-            'arxiv.org/pdf',  # PDFs timeout frequently
+            'arxiv.org/pdf',  # PDFs timeout issue
             'academia.edu',   # Often slow
             'sciencedirect.com',  # Paywall/slow
         ]
