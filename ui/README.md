@@ -5,7 +5,7 @@ A modern chat interface for the Research Agent with monitoring capabilities.
 ## Features
 
 - 💬 **Chatting Tab**: Interactive chat interface to communicate with the research agent
-- 📊 **Monitoring Tab**: Observability dashboard (coming soon)
+- 📊 **Monitoring Tab**: Observability dashboard that shows conversational history (threads)
 
 ## Setup
 

@@ -1,8 +1,10 @@
-# Quick Start Guide
+# Deep Research Agent
 
-## Running the Research Agent with UI
+## Quick Start Guide
 
-### 1. Backend Setup
+There are 2 ways of testing this Deep Research Agent implementation.
+
+1. Run the agent locally
 
 Navigate to the `agent` directory:
 
@@ -31,7 +33,7 @@ python api_server.py
 
 The API will run on `http://localhost:8000`
 
-### 2. Frontend Setup
+2. Run the agent with UI
 
 In a new terminal, navigate to the `ui` directory:
 
