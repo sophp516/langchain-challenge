@@ -34,7 +34,6 @@ def create_agent(use_checkpointer=False):
 
     # Research Workflow Nodes
     workflow.add_node("research_outline_and_write", research_outline_and_write)  # MERGED: generate_subtopics + verify + outline + write
-    workflow.add_node("revise_sections", revise_sections)  # Targeted section revision
 
     # User Feedback Nodes (after full report is generated)
     workflow.add_node("display_report", display_final_report)
@@ -86,17 +85,8 @@ def create_agent(use_checkpointer=False):
 
     # Research Flow
     workflow.add_edge("research_outline_and_write", "evaluate_report")
-    workflow.add_conditional_edges(
-        "evaluate_report",
-        route_after_evaluation,
-        {
-            "finalize": "display_report",
-            "revise": "revise_sections"  # Revise directly based on evaluator feedback
-        }
-    )
+    workflow.add_edge("evaluate_report", "display_report")
 
-    # After revising sections, re-evaluate the report
-    workflow.add_edge("revise_sections", "evaluate_report")
 
     # Display report first, then conditionally prompt for feedback (or skip to END)
     workflow.add_conditional_edges(

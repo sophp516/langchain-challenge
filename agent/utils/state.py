@@ -47,11 +47,6 @@ class UnifiedAgentState(TypedDict):
     # ReportEvaluatorState fields (added by transformation node)
     scores: dict[int, int]
 
-    # Iterative improvement fields
-    revision_count: int  # Number of revision iterations
-    final_score: int  # Final evaluation score
-    evaluator_feedback: str  # Feedback from evaluator for revision
-
     # User feedback loop fields
     user_feedback: list[str]  # List of user's feedback on the report
     feedback_incorporated: list[bool]  # List tracking if each feedback has been addressed

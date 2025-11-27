@@ -611,7 +611,6 @@ async def generate_outline(state: dict) -> dict:
         {{
           "title": "Section Title",
           "subtopics": ["subtopic1", "subtopic2"],
-          "key_questions": ["question1", "question2"]
         }}
       ]
     }}
@@ -634,18 +633,18 @@ async def generate_outline(state: dict) -> dict:
             # Fallback: create generic outline
             outline = {
                 "sections": [
-                    {"title": "Executive Summary", "subtopics": [], "key_questions": ["What are the key findings?"]},
-                    {"title": "Main Analysis", "subtopics": [], "key_questions": ["What are the main points?"]},
-                    {"title": "Conclusion", "subtopics": [], "key_questions": ["What are the implications?"]}
+                    {"title": "Executive Summary", "subtopics": []},
+                    {"title": "Main Analysis", "subtopics": []},
+                    {"title": "Conclusion", "subtopics": []}
                 ]
             }
     except Exception as e:
         print(f"generate_outline: error parsing JSON, using fallback: {e}")
         outline = {
             "sections": [
-                {"title": "Executive Summary", "subtopics": [], "key_questions": ["What are the key findings?"]},
-                {"title": "Main Analysis", "subtopics": [], "key_questions": ["What are the main points?"]},
-                {"title": "Conclusion", "subtopics": [], "key_questions": ["What are the implications?"]}
+                {"title": "Executive Summary", "subtopics": []},
+                {"title": "Main Analysis", "subtopics": []},
+                {"title": "Conclusion", "subtopics": []}
             ]
         }
 
@@ -667,7 +666,7 @@ async def search_for_section_sources(section_title: str, topic: str, search_api:
     Used when existing research doesn't provide enough sources.
     Respects the configured search API (tavily or serper).
     """
-    search_query = f"{topic} {section_title}"
+    search_query = f"{section_title}"
     print(f"    Searching for additional sources: '{search_query[:50]}...'")
 
     try:
@@ -701,12 +700,6 @@ async def write_single_section(
 ) -> dict:
     """
     Write a single section of the report with citations.
-    ENHANCED: Better leverages in-depth subresearch results including:
-    - Credibility-sorted sources for quality prioritization
-    - Expanded source coverage (top 10 instead of 5)
-    - Source type categorization (academic, news, social)
-    - Research depth awareness
-    - Entity-level detail preservation
 
     SEQUENTIAL WRITING: Receives previously written sections to maintain context.
     If insufficient sources exist, performs additional web search.
@@ -850,7 +843,7 @@ async def write_single_section(
     {source_diversity_note}
 
     SOURCES (numbered for citation):
-    {relevant_research[:20000]}
+    {relevant_research}
 
     **CRITICAL ANTI-HALLUCINATION RULES - VIOLATIONS ARE UNACCEPTABLE:**
     1. ONLY write about information that EXPLICITLY appears in the SOURCES above - word for word verification
@@ -885,28 +878,49 @@ async def write_single_section(
 
     **COMPREHENSIVE COVERAGE - THIS IS CRITICAL FOR HIGH SCORES:**
 
+    **ANTI-VAGUENESS RULES (STRICTLY ENFORCED):**
+    ❌ FORBIDDEN PHRASES - These will result in LOW EVIDENCE SCORES:
+    - "several", "various", "multiple", "many", "some", "a number of"
+    - "emerging titles", "new games" (without naming them)
+    - "industry trends show", "research indicates" (without specific numbers)
+    - "significant growth", "considerable impact" (without percentages/data)
+    - "players appreciate", "users prefer" (without survey data/numbers)
+
+    ✅ REQUIRED SPECIFICITY:
+    - Name ALL games, companies, people mentioned
+    - Include ALL numbers: player counts, revenue, percentages, dates, rankings
+    - Use EXACT quotes from sources for claims
+    - Include specific features/mechanics, not general descriptions
+
     **Entity Coverage Requirements:**
     - List ALL specific entities mentioned in sources (games, companies, products, people, etc.)
     - If sources mention "top 5", "best 10", etc., list ALL items with names
-    - DO NOT summarize as "various X" or "several Y" - name them ALL specifically
-    - If sources mention 10 games, your section should discuss all 10, not just 2-3
     - Example: ❌ "Several MMORPGs like WoW remain popular"
-              ✅ "Top MMORPGs include World of Warcraft, Final Fantasy XIV, Guild Wars 2, Elder Scrolls Online, and Lost Ark [1][2][3]"
+              ✅ "Top MMORPGs in 2025 include World of Warcraft (5.2M active players), Final Fantasy XIV (3.8M players), Guild Wars 2 (2.1M players), Elder Scrolls Online (1.9M players), and Lost Ark (1.5M players) [1][2][3]"
+    - Example: ❌ "New expansions introduce exciting features"
+              ✅ "WoW's Midnight expansion (Q2 2025) adds housing system with 50+ customization options and revamped talent trees affecting all 13 classes [5]"
 
-    **Numerical/Statistical Coverage:**
-    - Include ALL RANKINGS with exact positions (e.g., "#1 WoW with 5M players, #2 FFXIV with 3M players")
-    - Include ALL DATES, NUMBERS, STATISTICS mentioned in sources
-    - If source lists player counts, revenue, releases dates - include them all
+    **Numerical/Statistical Requirements (MANDATORY):**
+    - EVERY claim about popularity, growth, or trends MUST include:
+      * Exact numbers (not "many" or "significant")
+      * Dates (not "recently" or "in 2025")
+      * Percentages (not "increased" but "increased 23%")
+      * Comparisons with specific values ("from 2.1M to 3.4M players")
+    - Example: ❌ "FFXIV saw substantial growth in 2025"
+              ✅ "FFXIV grew from 3.1M to 3.8M active players (+22.6%) between Jan-Nov 2025 [7]"
+    - Example: ❌ "Mobile MMORPGs are gaining traction"
+              ✅ "Mobile MMORPGs generated $12.3B revenue in 2025 (+18% YoY), led by Genshin Impact ($3.2B) and Tower of Fantasy ($1.8B) [9]"
+
+    **Feature/Mechanic Specificity:**
+    - DON'T say: "innovative gameplay mechanics"
+    - DO say: "cross-server dungeons supporting 40-player raids, dynamic weather affecting combat stats, and player-owned guild halls with crafting stations [12]"
+    - DON'T say: "improved graphics"
+    - DO say: "upgraded to Unreal Engine 5.3 with ray tracing, DLSS 3.5 support, and 4K textures reducing load times by 35% [15]"
 
     **Comparison Requirements:**
-    - When multiple entities exist, actively COMPARE and CONTRAST them
-    - Don't just describe each separately - analyze differences and similarities
-    - Use comparative language: "while X focuses on Y, Z emphasizes W"
-
-    **Coverage Validation:**
-    - Before finishing, count how many entities/items you mentioned vs. what's in sources
-    - Aim for 80%+ coverage of entities mentioned in sources
-    - If sources mention 10 items but you only covered 3, you FAILED this section
+    - ALWAYS include specific data points when comparing
+    - Example: ❌ "WoW is more popular than GW2"
+              ✅ "WoW maintains 5.2M active players vs GW2's 2.1M (2.5x larger playerbase), but GW2 has higher retention rate (78% vs 65% 6-month retention) [1][4]"
 
     **EVIDENCE:**
     - Every factual claim must have a citation [1], [2], etc.
@@ -930,7 +944,6 @@ async def write_single_section(
     - Use active voice when appropriate for readability
     
     **LENGTH AND DEPTH:**
-    - Write 4-7 substantial paragraphs (aim for 400-800 words for comprehensive sections)
     - Provide sufficient detail to comprehensively cover the topic
     - Balance depth with readability
     - CRITICAL: You have access to {len(sources_list)} high-quality sources
@@ -955,9 +968,72 @@ async def write_single_section(
         HumanMessage(content=section_prompt)
     ]
 
-    response = await llm_quality.ainvoke(messages)
-    section_content = response.content if hasattr(response, 'content') else str(response)
+    # Validation: Check for forbidden vague phrases and enforce specificity
+    max_retries = 2
+    for attempt in range(max_retries):
+        response = await llm_quality.ainvoke(messages)
+        section_content = response.content if hasattr(response, 'content') else str(response)
 
+        # Check for forbidden phrases
+        forbidden_phrases = [
+            "several", "various", "multiple", "many", "some", "a number of",
+            "significant", "substantial", "considerable", "notable",
+            "emerging titles", "new games", "industry trends show", "research indicates"
+        ]
+
+        content_lower = section_content.lower()
+        violations = [phrase for phrase in forbidden_phrases if phrase in content_lower]
+
+        # Check citation density (should cite at least 30% of available sources)
+        import re
+        citations = re.findall(r'\[\d+\]', section_content)
+        unique_citations = len(set(citations))
+        min_required_citations = max(len(sources_list) // 3, 5)
+
+        # Check for numerical data usage (should have at least 10 numbers in the section)
+        numbers_in_content = len(re.findall(r'\d+(?:\.\d+)?[MBK]?\s*(?:million|billion|thousand|players|users|%|dollars)?', section_content))
+
+        if violations or unique_citations < min_required_citations or numbers_in_content < 10:
+            print(f"      ⚠️  VALIDATION FAILED (attempt {attempt + 1}/{max_retries}):")
+            if violations:
+                print(f"         - Forbidden phrases found: {violations[:3]}")
+            if unique_citations < min_required_citations:
+                print(f"         - Insufficient citations: {unique_citations}/{len(sources_list)} (need {min_required_citations})")
+            if numbers_in_content < 10:
+                print(f"         - Insufficient numerical data: {numbers_in_content} numbers found (need 10+)")
+
+            if attempt < max_retries - 1:
+                print(f"         - Regenerating section with stricter prompt...")
+                # Add stricter validation message for retry
+                messages.append(AIMessage(content=section_content))
+                messages.append(HumanMessage(content=f"""
+VALIDATION FAILED. Your section was rejected for:
+{f"- Using forbidden vague phrases: {', '.join(violations[:3])}" if violations else ""}
+{f"- Only {unique_citations} citations out of {len(sources_list)} sources available (need {min_required_citations}+)" if unique_citations < min_required_citations else ""}
+{f"- Only {numbers_in_content} numbers/statistics found (need 10+ specific data points)" if numbers_in_content < 10 else ""}
+
+REGENERATE THIS SECTION with:
+1. NO vague words like "several", "various", "many", "significant", "notable"
+2. EVERY sentence must cite sources with [1], [2], etc.
+3. Include SPECIFIC numbers, dates, percentages from the sources
+4. Name ALL entities (games, companies, people) mentioned in sources
+5. Use AT LEAST {min_required_citations} different source citations
+
+EXAMPLE OF WHAT IS REQUIRED:
+❌ BAD: "Several popular MMORPGs saw significant growth"
+✅ GOOD: "World of Warcraft grew from 5.2M to 6.1M players (+17.3%), Final Fantasy XIV increased from 3.1M to 3.8M players (+22.6%), and Elder Scrolls Online expanded from 1.9M to 2.3M players (+21%) between January-November 2025 [1][2][3]"
+
+Write the section again NOW with extreme specificity.
+"""))
+            else:
+                print(f"         - Max retries reached, accepting section with warnings")
+                break
+        else:
+            print(f"      ✓ VALIDATION PASSED:")
+            print(f"         - {unique_citations} unique citations (required: {min_required_citations})")
+            print(f"         - {numbers_in_content} numerical data points (required: 10)")
+            print(f"         - No forbidden vague phrases detected")
+            break
 
     return {
         "title": section_title,
@@ -965,7 +1041,6 @@ async def write_single_section(
         "sources": sources_list,
         "subtopics": section_subtopics
     }
-
 
 
 
@@ -1081,34 +1156,28 @@ async def research_sections(state: dict, config: RunnableConfig) -> dict:
         """Process a single section through subresearcher"""
         section_title = section.get("title", "")
         section_subtopics = section.get("subtopics", [])
-        section_questions = section.get("key_questions", [])
 
-        # Build TARGETED research query from section title + subtopics + key questions
-        # This focuses the subresearcher on specific aspects
-        research_query = f"{topic} {section_title}"
-
-        # Add subtopics to make research more specific
-        if section_subtopics:
-            subtopics_str = " ".join(section_subtopics[:3])  # Use first 3 subtopics
-            research_query += f" {subtopics_str}"
-
-        # Add key questions for additional context
-        if section_questions:
-            research_query += " " + " ".join(section_questions[:2])
-
-        print(f"  Researching section {idx+1}: {section_title} (subtopics: {section_subtopics[:3]})")
+        print(f"\n  === Researching section {idx+1}/{len(sections)}: {section_title} ===")
+        print(f"      Subtopics: {section_subtopics[:3]}")
 
         subgraph_state = {
             "subtopic_id": idx,
-            "subtopic": research_query,
+            "subtopic": section_title,
             "main_topic": topic,
             "other_subtopics": [s.get("title", "") for s in sections],
+            "section_subtopics": section_subtopics,
             "research_results": {},
             "research_depth": 1,
             "source_credibilities": {},
+            "source_relevance_scores": {},
+            "entities": [],
+            "research_plan": [],
+            "completed_searches": 0,
             "max_search_results": agent_config.max_search_results,
             "max_research_depth": agent_config.max_research_depth,
-            "search_api": agent_config.search_api
+            "search_api": agent_config.search_api,
+            "enable_mcp_fetch": agent_config.enable_mcp_fetch,
+            "max_mcp_fetches": agent_config.max_mcp_fetches
         }
 
         result = await subresearcher_graph.ainvoke(subgraph_state)
@@ -1206,18 +1275,6 @@ async def evaluate_report(state: dict) -> dict:
     CLARITY: [score]/25
     TOTAL: [sum of above]/100
     FEEDBACK: [One paragraph of constructive feedback on what could be improved]
-
-    SECTIONS_TO_REVISE: [List the titles of sections that need significant improvement, or "NONE" if all sections are adequate]
-
-    SECTION_SPECIFIC_FEEDBACK:
-    [For each section that needs improvement, provide:]
-    ### Section: [Title]
-    - Issues: [What's wrong with this section specifically]
-    - Missing: [What content/entities/details are missing]
-    - Improvements: [Specific actions to improve it]
-
-    [If no sections need improvement, write "All sections are adequate"]
-    
     """
 
     messages = [
@@ -1232,457 +1289,7 @@ async def evaluate_report(state: dict) -> dict:
     # DEBUG: Log the full response to understand Gemini's format
     print(f"evaluate_report: FULL GEMINI RESPONSE:\n{response_text}\n---END RESPONSE---")
 
-    coverage_match = re.search(r'COVERAGE:\s*(\d+)', response_text)
-    evidence_match = re.search(r'EVIDENCE:\s*(\d+)', response_text)
-    structure_match = re.search(r'STRUCTURE:\s*(\d+)', response_text)
-    clarity_match = re.search(r'CLARITY:\s*(\d+)', response_text)
-    total_match = re.search(r'TOTAL:\s*(\d+)', response_text)
-    score = int(total_match.group(1)) if total_match else 75
-
-    feedback_match = re.search(r'FEEDBACK:\s*(.+?)(?=SECTIONS_TO_REVISE:|$)', response_text, re.DOTALL)
-    feedback_text = feedback_match.group(1).strip() if feedback_match else "N/A"
-
-    # Parse sections to revise
-    sections_to_revise_match = re.search(r'SECTIONS_TO_REVISE:\s*(.+?)(?=SECTION_SPECIFIC_FEEDBACK:|$)', response_text, re.DOTALL)
-    sections_to_revise_raw = sections_to_revise_match.group(1).strip() if sections_to_revise_match else "NONE"
-
-    # Parse section-specific feedback
-    section_feedback_match = re.search(r'SECTION_SPECIFIC_FEEDBACK:\s*(.+)', response_text, re.DOTALL)
-    section_specific_feedback_text = section_feedback_match.group(1).strip() if section_feedback_match else "All sections are adequate"
-
-    # Extract individual section feedback blocks
-    section_feedback_dict = {}
-    sections_to_revise_list = []
-
-    # ROBUST PARSING: Try multiple methods to extract section titles
-    if "All sections are adequate" not in section_specific_feedback_text and "NONE" not in sections_to_revise_raw.upper():
-
-        # Method 1: Try parsing "### Section: [Title]" format
-        section_blocks = re.findall(r'### Section:\s*(.+?)\n((?:-.+?\n)+)', section_specific_feedback_text, re.DOTALL)
-        if section_blocks:
-            for section_title, section_details in section_blocks:
-                clean_title = section_title.strip()
-                section_feedback_dict[clean_title] = section_details.strip()
-                sections_to_revise_list.append(clean_title)
-
-        # Method 2: If no structured feedback found, parse from SECTIONS_TO_REVISE line
-        # Handle formats like: "Emerging MMORPGs Gaining Traction" or ["Section1", "Section2"]
-        if not sections_to_revise_list:
-            # Try to parse as JSON list
-            try:
-                import json
-                parsed_list = json.loads(sections_to_revise_raw)
-                if isinstance(parsed_list, list):
-                    sections_to_revise_list = [s.strip() for s in parsed_list]
-            except:
-                # Not JSON, treat as single section title or comma-separated
-                if ',' in sections_to_revise_raw:
-                    sections_to_revise_list = [s.strip() for s in sections_to_revise_raw.split(',')]
-                else:
-                    # Single section title
-                    sections_to_revise_list = [sections_to_revise_raw.strip()]
-
-            # Use the general feedback for sections without specific feedback
-            for section_title in sections_to_revise_list:
-                if section_title not in section_feedback_dict:
-                    section_feedback_dict[section_title] = section_specific_feedback_text
-
-    print(f"evaluate_report: feedback={feedback_text}")
-    print(f"evaluate_report: sections_to_revise_raw='{sections_to_revise_raw}'")
-    print(f"evaluate_report: sections_to_revise_list={sections_to_revise_list}")
-    print(f"evaluate_report: section_feedback_dict has {len(section_feedback_dict)} entries")
-
-    scores = state.get("scores", {})
-    scores[current_report_id] = score
-
-    print(f"evaluate_report: score={score}/100 for report_id={current_report_id}")
-    print(f"COVERAGE: {coverage_match.group(1) if coverage_match else 'N/A'}")
-    print(f"EVIDENCE: {evidence_match.group(1) if evidence_match else 'N/A'}")
-    print(f"STRUCTURE: {structure_match.group(1) if structure_match else 'N/A'}")
-    print(f"CLARITY: {clarity_match.group(1) if clarity_match else 'N/A'}")
-
-    return {
-        "scores": scores,
-        "final_score": score,
-        "evaluator_feedback": feedback_text,  # General feedback
-        "section_feedback_dict": section_feedback_dict,  # Section-specific feedback
-        "sections_to_revise": sections_to_revise_list  # List of section titles (properly parsed)
-    }
-
-
-async def revise_sections(state: dict, config: RunnableConfig) -> dict:
-    """
-    TARGETED REVISION: Only revise sections flagged by Gemini evaluator.
-    Uses section-specific feedback for targeted deep research and improvements.
-    """
-    agent_config = get_config_from_configurable(config.get("configurable", {}))
-
-    topic = state.get("topic", "")
-    report_sections = state.get("report_sections", [])
-    sub_researchers = state.get("sub_researchers", [])
-    revision_count = state.get("revision_count", 0)
-    evaluator_feedback = state.get("evaluator_feedback", "")
-    section_feedback_dict = state.get("section_feedback_dict", {})
-    sections_to_revise = state.get("sections_to_revise", [])
-
-    print(f"revise_sections: starting TARGETED revision (revision {revision_count})")
-    print(f"revise_sections: sections_to_revise={sections_to_revise}")
-
-    if not sections_to_revise or len(sections_to_revise) == 0:
-        print("revise_sections: no sections flagged for revision, skipping to finalization")
-        # No sections to revise, but we still need to increment revision count to prevent infinite loop
-        return {
-            "revision_count": revision_count + 1,  # Increment to break the loop
-            "final_score": state.get("final_score", 0)  # Pass through score unchanged
-        }
-
-    if not evaluator_feedback or evaluator_feedback == "N/A":
-        print("revise_sections: no evaluator feedback available, returning unchanged")
-        return {}
-
-    # Build research lookup (same as write_sections_with_citations)
-    research_by_subtopic = {}
-    for researcher in sub_researchers:
-        subtopic = researcher.get("subtopic", "")
-        research_by_subtopic[subtopic] = {
-            "results": researcher.get("research_results", {}),
-            "credibilities": researcher.get("source_credibilities", {})
-        }
-
-    # TARGETED REVISION: Only revise sections flagged by evaluator
-    print(f"revise_sections: revising {len(sections_to_revise)}/{len(report_sections)} flagged sections")
-
-    # Build a mapping of section title -> section object for quick lookup
-    section_map = {section.get("title", ""): section for section in report_sections}
-
-    tasks = []
-    sections_being_revised = []
-
-    for section_title in sections_to_revise:
-        # Get section-specific feedback for this section
-        specific_feedback = section_feedback_dict.get(section_title, evaluator_feedback)
-
-        print(f"  Revising section: {section_title}")
-        print(f"    Specific feedback: {specific_feedback[:100]}...")
-
-        # Find the corresponding section
-        if section_title not in section_map:
-            print(f"    WARNING: Section '{section_title}' not found in report_sections, skipping")
-            continue
-
-        section = section_map[section_title]
-        sections_being_revised.append(section_title)
-
-        # Create a modified section dict with subtopics for research lookup
-        section_dict = {
-            "title": section_title,
-            "subtopics": section.get("subtopics", []),
-            "key_questions": section.get("key_questions", []),
-            "original_content": section.get("content", "")
-        }
-
-        tasks.append(revise_single_section(
-            section_dict,
-            topic,
-            research_by_subtopic,
-            agent_config.min_credibility_score,
-            specific_feedback,  # Pass SECTION-SPECIFIC feedback (not general feedback)
-            agent_config  # Pass full agent config for search API and research depth settings
-        ))
-
-    # Execute revisions in parallel (only for flagged sections)
-    revised_sections_list = await asyncio.gather(*tasks)
-
-    print(f"revise_sections: completed revision of {len(revised_sections_list)} sections")
-
-    # Merge revised sections back into the full report
-    # Keep unchanged sections as-is, replace revised sections
-    revised_sections_map = {section['title']: section for section in revised_sections_list}
-
-    final_sections = []
-    for original_section in report_sections:
-        section_title = original_section.get("title", "")
-        if section_title in revised_sections_map:
-            # Use revised version
-            final_sections.append(revised_sections_map[section_title])
-            print(f"  Using REVISED version of: {section_title}")
-        else:
-            # Keep original version
-            final_sections.append(original_section)
-            print(f"  Keeping ORIGINAL version of: {section_title}")
-
-    # Increment revision count
-    new_revision_count = revision_count + 1
-
-    # Rebuild full report from merged sections
-    full_report = f"# {topic}\n\n"
-    all_sources = []
-
-    for section in final_sections:
-        full_report += f"## {section['title']}\n\n{section['content']}\n\n"
-        all_sources.extend(section.get('sources', []))
-
-    # Add references section with properly formatted markdown links
-    unique_sources = list(dict.fromkeys(all_sources))
-    full_report += "## References\n\n"
-    for i, source in enumerate(unique_sources, 1):
-        formatted_source = format_source_as_markdown_link(source)
-        full_report += f"[{i}] {formatted_source}\n"
-
-    # Save to MongoDB
-    report_id = state.get("report_id", "")
-    new_version_id = state.get("version_id", 0) + 1
-    messages = state.get("messages", [])
-
-    try:
-        await save_report(report_id, new_version_id, full_report)
-        print(f"revise_sections: saved report {report_id} version {new_version_id}")
-        messages = messages + [AIMessage(content=f"revise_sections: saved report {report_id} version {new_version_id}")]
-
-    except Exception as e:
-        print(f"revise_sections: failed to save report to MongoDB: {e}")
-
-    return {
-        "report_sections": final_sections,  # Use merged sections (revised + unchanged)
-        "report_content": full_report,
-        "report_references": unique_sources,
-        "version_id": new_version_id,
-        "report_history": state.get("report_history", []) + [new_version_id],
-        "revision_count": new_revision_count,
-        "messages": messages
-    }
-
-
-async def search_based_on_feedback(
-    section_title: str,
-    topic: str,
-    evaluator_feedback: str,
-    agent_config,
-    existing_research: dict = None
-) -> dict:
-    """
-    Use LLM to analyze evaluator feedback and generate targeted search queries.
-    Performs multi-depth research using subresearcher_graph for comprehensive coverage.
-
-    Returns dict of {source_key: source_content} for additional sources found.
-    """
-    existing_research = existing_research or {}
-
-    print(f"      Analyzing feedback with LLM to generate search queries...")
-
-    # Use LLM to determine if additional research is needed and generate search queries
-    SearchAnalysisOutput = create_model(
-        'SearchAnalysisOutput',
-        needs_research=(bool, ...),
-        reasoning=(str, ...),
-        search_queries=(list[str], ...)
-    )
-
-    search_analysis_llm = llm.with_structured_output(SearchAnalysisOutput)
-
-    analysis_prompt = f"""
-    Analyze the evaluator feedback to determine if additional research is needed for this section.
-
-    Section: {section_title}
-    Topic: {topic}
-
-    Evaluator Feedback:
-    {evaluator_feedback}
-
-    Existing Research Available:
-    {len(existing_research)} sources currently available
-
-    **YOUR TASK:**
-    1. Determine if additional research would help address the feedback
-    2. If yes, generate 1-3 targeted search queries that would find the missing information
-    3. Make queries specific and focused on the gaps identified in the feedback
-
-    **DECISION CRITERIA:**
-    - Additional research IS needed if: feedback mentions missing details, lacks evidence, needs examples, insufficient coverage
-    - Additional research NOT needed if: feedback is about writing style, structure, clarity (non-content issues)
-
-    Return:
-    - needs_research: true/false
-    - reasoning: Why you made this decision (one sentence)
-    - search_queries: List of 1-3 specific search queries (empty if needs_research=false)
-    """
-
-    try:
-        response = await search_analysis_llm.ainvoke([
-            SystemMessage(content="You analyze research gaps and generate targeted search queries."),
-            HumanMessage(content=analysis_prompt)
-        ])
-
-        needs_research = response.needs_research
-        reasoning = response.reasoning
-        search_queries = response.search_queries[:3]  # Max 3 queries
-
-        print(f"      LLM Decision: {'NEEDS RESEARCH' if needs_research else 'SUFFICIENT'}")
-        print(f"      Reasoning: {reasoning}")
-
-        if not needs_research:
-            return {}
-
-        print(f"      Generated {len(search_queries)} search queries:")
-        for i, query in enumerate(search_queries, 1):
-            print(f"        {i}. {query[:80]}...")
-
-    except Exception as e:
-        print(f"      LLM analysis failed: {e}, skipping additional research")
-        return {}
-
-    # Execute multi-depth research for each query using subresearcher_graph
-    print(f"      Executing multi-depth research using subresearcher_graph...")
-
-    all_additional_sources = {}
-
-    for query_idx, search_query in enumerate(search_queries):
-        print(f"      Query {query_idx + 1}/{len(search_queries)}: {search_query[:60]}...")
-
-        # Create subresearcher state for this query
-        subgraph_state = {
-            "subtopic_id": 1000 + query_idx,  # Use high ID to distinguish from main research
-            "subtopic": search_query,
-            "main_topic": topic,
-            "other_subtopics": [],
-            "research_results": {},
-            "research_depth": 1,
-            "source_credibilities": {},
-            "max_search_results": agent_config.max_search_results,
-            "max_research_depth": agent_config.max_research_depth,
-            "search_api": agent_config.search_api
-        }
-
-        try:
-            # Invoke subresearcher for deep research
-            result = await subresearcher_graph.ainvoke(subgraph_state)
-
-            # Extract results
-            research_results = result.get("research_results", {})
-            source_credibilities = result.get("source_credibilities", {})
-            depth_reached = result.get("research_depth", 1)
-
-            print(f"        Found {len(research_results)} sources (depth: {depth_reached})")
-
-            # Add credible sources to our pool
-            for source_key, content in research_results.items():
-                credibility = source_credibilities.get(source_key, 0.5)
-                if credibility >= agent_config.min_credibility_score:
-                    all_additional_sources[source_key] = content[:800]
-
-        except Exception as e:
-            print(f"        Subresearcher failed for query: {e}")
-            continue
-
-    print(f"      Total additional sources from multi-depth research: {len(all_additional_sources)}")
-    return all_additional_sources
-
-
-async def revise_single_section(
-    section: dict,
-    topic: str,
-    research_by_subtopic: dict,
-    min_credibility_score: float,
-    evaluator_feedback: str,
-    agent_config
-) -> dict:
-    """
-    Revise a single section based on evaluator feedback from Gemini.
-    Uses the original content as a base and improves it according to the feedback.
-
-    Enhanced approach:
-    1. Gather existing research sources
-    2. Use LLM to analyze feedback and generate targeted search queries
-    3. Execute multi-depth research using subresearcher_graph
-    4. Make targeted revisions with comprehensive additional context
-    """
-    section_title = section.get("title", "")
-    original_content = section.get("original_content", "")
-    section_subtopics = section.get("subtopics", [])
-
-    print(f"    Revising: {section_title}")
-
-    # Gather relevant research from existing sources
-    relevant_research = ""
-    sources_list = []
-    existing_research_dict = {}
-
-    for subtopic in section_subtopics:
-        if subtopic in research_by_subtopic:
-            results = research_by_subtopic[subtopic]["results"]
-            credibilities = research_by_subtopic[subtopic]["credibilities"]
-
-            # Use top 25 sources for revision (same as initial writing)
-            for source, findings in list(results.items())[:25]:
-                if credibilities.get(source, 0.5) >= min_credibility_score:
-                    relevant_research += f"\nSource: {source}\n{findings}\n"
-                    sources_list.append(source)
-                    existing_research_dict[source] = findings
-
-    # PHASE 1: Multi-depth research based on LLM-analyzed feedback
-    additional_sources = await search_based_on_feedback(
-        section_title=section_title,
-        topic=topic,
-        evaluator_feedback=evaluator_feedback,
-        agent_config=agent_config,
-        existing_research=existing_research_dict
-    )
-
-    # Add the additional sources to our research pool
-    if additional_sources:
-        print(f"      Found {len(additional_sources)} additional sources from multi-depth research")
-        for source_key, source_content in additional_sources.items():
-            relevant_research += f"\nSource (multi-depth research): {source_key}\n{source_content}\n"
-            sources_list.append(source_key)
-
-    revision_prompt = f"""
-    You are revising the "{section_title}" section of a research report on: {topic}
-
-    ORIGINAL CONTENT:
-    {original_content}
-
-    **EVALUATOR FEEDBACK (address these improvement areas):**
-    {evaluator_feedback}
-
-    SOURCES FOR REVISION (You have {len(sources_list)} sources - use them all!):
-    {relevant_research[:20000]}
-
-    **STRICT GROUNDING RULES:**
-    1. ONLY add information that appears in the SOURCES above
-    2. Every new claim MUST cite a source
-    3. DO NOT invent names, titles, dates, statistics, or facts not in sources
-    4. DO NOT use placeholder names like "XYZ", "Company A", etc.
-    5. If sources don't provide enough info to address feedback, acknowledge the limitation
-    6. It's better to make conservative improvements than to fabricate information
-
-    **REVISION APPROACH - INCREMENTAL FIXES ONLY:**
-    - This is a REVISION, not a rewrite - preserve the structure and flow of the original
-    - Make MINIMAL, TARGETED changes to address specific feedback points
-    - Keep all accurate content unchanged - only fix what needs fixing
-    - Add missing information where gaps are identified
-    - Clarify confusing parts without restructuring entire paragraphs
-    - Remove or correct inaccurate claims
-    - Add citations [1], [2] only for new claims
-    - If the original content is mostly good, make small additions/corrections rather than rewriting
-    - If sources don't support addressing specific feedback, note: "Additional research needed on [topic]"
-
-    Return ONLY the revised section content (no title/header).
-    """
-
-    messages = [
-        SystemMessage(content="You are a research report editor who improves sections based on evaluator feedback while maintaining strict adherence to sources. Never fabricate information."),
-        HumanMessage(content=revision_prompt)
-    ]
-
-    response = await llm_quality.ainvoke(messages)
-    revised_content = response.content if hasattr(response, 'content') else str(response)
-
-    return {
-        "title": section_title,
-        "content": revised_content,
-        "sources": sources_list,
-        "subtopics": section_subtopics
-    }
+    return { **state }
 
 
 def display_final_report(state: dict) -> dict:
@@ -1893,31 +1500,6 @@ async def should_continue_to_report(state: dict) -> bool:
     print(f"should_continue_to_report: subtopics_count={subtopics_count}, returning {result}")
     return result
 
-
-def route_after_evaluation(state: dict, config: RunnableConfig) -> str:
-    """
-    Conditional edge: Route after report evaluation
-    - If score >= min_report_score: Report is good, finalize
-    - If score < min_report_score and revision_count < max_revision_rounds: Identify gaps and revise
-    - If revision_count >= max_revision_rounds: Accept report even if not perfect
-    """
-    agent_config = get_config_from_configurable(config.get("configurable", {}))
-
-    final_score = state.get("final_score", 0)
-    revision_count = state.get("revision_count", 0)
-
-    print(f"route_after_evaluation: score={final_score}, revisions={revision_count}")
-    print(f"route_after_evaluation: min_report_score={agent_config.min_report_score}, max_revision_rounds={agent_config.max_revision_rounds}")
-
-    # If score is good enough, finalize
-    if final_score >= agent_config.min_report_score:
-        print(f"route_after_evaluation: score {final_score} >= {agent_config.min_report_score}, finalizing")
-        return "finalize"
-
-    # If we've hit max revisions, accept current version
-    if revision_count >= agent_config.max_revision_rounds:
-        print(f"route_after_evaluation: max revisions ({agent_config.max_revision_rounds}) reached, finalizing")
-        return "finalize"
 
     # Otherwise, identify gaps and revise
     print(f"route_after_evaluation: score {final_score} < {agent_config.min_report_score}, identifying gaps for revision")

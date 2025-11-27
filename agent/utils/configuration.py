@@ -125,6 +125,19 @@ class AgentConfig(BaseModel):
         description="Minimum credibility score for sources (0.0-1.0)"
     )
 
+    # MCP fetch settings (for full content extraction)
+    enable_mcp_fetch: bool = Field(
+        default=True,
+        description="Enable MCP fetch for full article content extraction"
+    )
+
+    max_mcp_fetches: int = Field(
+        default=5,
+        ge=0,
+        le=10,
+        description="Maximum number of URLs to fetch full content for per section (0-10)"
+    )
+
 
 def get_config_from_configurable(configurable: dict) -> AgentConfig:
     """
