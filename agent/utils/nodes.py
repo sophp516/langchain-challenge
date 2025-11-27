@@ -696,7 +696,8 @@ async def write_single_section(
     min_credibility_score: float,
     all_sections: list = None,
     section_index: int = 0,
-    previously_written_sections: list = None
+    previously_written_sections: list = None,
+    search_api: str = "serper"
 ) -> dict:
     """
     Write a single section of the report with citations.
@@ -765,9 +766,8 @@ async def write_single_section(
     # If insufficient sources, search for more
     if len(sources_list) < MIN_SOURCES_THRESHOLD:
         print(f"    Section '{section_title}' has only {len(sources_list)} sources, searching for more...")
-        # Get search_api from config (passed via state would require function signature change)
-        # For now, use tavily as default - this is a fallback search anyway
-        additional_results = await search_for_section_sources(section_title, topic, search_api="tavily")
+        # Use configured search API for fallback searches
+        additional_results = await search_for_section_sources(section_title, topic, search_api=search_api)
 
         for result in additional_results:
             source_url = result.get("url", "")
@@ -1072,8 +1072,15 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
 
     print(f"write_sections_with_citations: Available research keys:")
     for key in research_by_subtopic.keys():
-        num_sources = len(research_by_subtopic[key]["results"])
-        print(f"  '{key}': {num_sources} sources")
+        results = research_by_subtopic[key]["results"]
+        credibilities = research_by_subtopic[key]["credibilities"]
+        num_sources = len(results)
+
+        # Count sources that meet credibility threshold
+        credible_count = sum(1 for source in results.keys()
+                            if credibilities.get(source, 0.5) >= agent_config.min_credibility_score)
+
+        print(f"  '{key}': {num_sources} sources ({credible_count} meet credibility threshold >= {agent_config.min_credibility_score})")
 
     # Write sections one at a time so each has context from previous sections
     print(f"write_sections_with_citations: writing {len(sections)} sections SEQUENTIALLY for context flow")
@@ -1088,7 +1095,8 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
             min_credibility_score=agent_config.min_credibility_score,
             all_sections=sections,
             section_index=idx,
-            previously_written_sections=written_sections  # Pass previously completed sections
+            previously_written_sections=written_sections,  # Pass previously completed sections
+            search_api=agent_config.search_api  # Pass configured search API
         )
         written_sections.append(section_result)
         print(f"  Completed section {idx + 1}/{len(sections)}: {section_result.get('title', 'Unknown')}")
@@ -1499,11 +1507,6 @@ async def should_continue_to_report(state: dict) -> bool:
     result = subtopics_count > 0
     print(f"should_continue_to_report: subtopics_count={subtopics_count}, returning {result}")
     return result
-
-
-    # Otherwise, identify gaps and revise
-    print(f"route_after_evaluation: score {final_score} < {agent_config.min_report_score}, identifying gaps for revision")
-    return "revise"
 
 
 def route_after_display_report(state: dict, config: RunnableConfig) -> str:

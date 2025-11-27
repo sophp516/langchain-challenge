@@ -119,7 +119,7 @@ class AgentConfig(BaseModel):
     )
 
     min_credibility_score: float = Field(
-        default=0.5,
+        default=0.3,
         ge=0.0,
         le=1.0,
         description="Minimum credibility score for sources (0.0-1.0)"
