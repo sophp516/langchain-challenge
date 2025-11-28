@@ -31,10 +31,6 @@ else:
     test_data_collection = None
 
 
-# ============================================================================
-# REPORT VERSION CONTROL FUNCTIONS
-# ============================================================================
-
 
 async def save_report(
         report_id: str,

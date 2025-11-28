@@ -578,36 +578,50 @@ RESEARCH SO FAR:
 
 ANALYZE:
 1. **Coverage Score** (0.0-1.0): How well does this research cover the expected subtopics?
-   - 1.0 = Comprehensive, all subtopics well-covered with specific examples, data, and details
-   - 0.8-0.9 = Good coverage, most subtopics addressed with some specifics
-   - 0.6-0.7 = Adequate coverage, subtopics mentioned but lacking depth/specifics
-   - 0.4-0.5 = Partial coverage, major gaps exist, missing key details/examples
-   - 0.0-0.3 = Minimal coverage, mostly off-topic or very superficial
-   - BE STRICT: Coverage requires SPECIFIC examples, data points, and detailed explanations, not just general statements
+   - 0.85-1.0 = Excellent: All subtopics comprehensively covered with multiple specific examples, data, statistics, and detailed explanations
+   - 0.75-0.84 = Good: Most subtopics well-covered with specific examples and some data points, minor gaps acceptable
+   - 0.60-0.74 = Moderate: Subtopics addressed but lacking specific examples, data, or depth; needs targeted improvement
+   - 0.40-0.59 = Weak: Major gaps exist, missing key details, examples, or entire subtopics
+   - 0.0-0.39 = Poor: Minimal coverage, mostly off-topic or very superficial
+   - BE FAIR BUT THOROUGH: Don't penalize for missing obscure details, but do require specific examples and data for main subtopics
 
-2. **Discovered Entities**: Extract 3-5 SPECIFIC, RESEARCHABLE entities mentioned that warrant deeper investigation:
-   - Focus on: Specific studies, research papers, named methodologies, key researchers, specific techniques/exercises
-   - AVOID: Generic organizations (unless central to topic), brand names, websites, unless they represent key concepts
-   - Only include entities that are:
-     a) Directly relevant to the main topic AND comparison
-     b) Will yield NEW information when researched (not just general info)
-     c) Specific enough to generate targeted search results
-   - Example for "powerlifting vs Olympic lifting": ["snatch technique", "squat biomechanics", "periodization models"]
-   - NOT: ["USA Weightlifting", "Westside Barbell", "Barbell Medicine"] (these are organizations, not researchable concepts)
-   - Prefer: Specific techniques, studies, methodologies, or key concepts that need deeper investigation
+2. **Discovered Entities**: Extract 2-4 SPECIFIC, NAMED entities that warrant deeper investigation:
+   - ONLY include entities that are PROPER NOUNS or SPECIFIC NAMED THINGS:
+     ✅ Organizations: "International Weightlifting Federation (IWF)", "USA Powerlifting (USAPL)", "IPF"
+     ✅ Named techniques: "Westside Barbell conjugate method", "Smolov squat program", "Bulgarian training system"
+     ✅ Specific studies: "Haff et al. 2003 periodization study", "Stone biomechanics research 2015"
+     ✅ Named individuals: "Dr. Mike Israetel", "Boris Sheiko", "Greg Everett"
+     ✅ Specific competitions: "Arnold Classic", "World Weightlifting Championships", "IPF Worlds"
+   - NEVER include generic concepts or abstract ideas:
+     ❌ "snatch technique" (too generic - this is already covered)
+     ❌ "injury rates" (concept, not entity)
+     ❌ "biomechanics" (too vague)
+     ❌ "community culture" (abstract idea)
+   - ONLY include entities if they would significantly improve the report with specific information
+   - Test: Can you Google this exact phrase and find a Wikipedia page or official website? If YES → include. If NO → exclude.
+   - PREFER FEWER HIGH-VALUE entities over many low-value ones
 
-3. **Knowledge Gaps**: Identify 2-4 specific, ACTIONABLE search queries (not questions):
-   - Convert questions into search-friendly queries
-   - Focus on missing data, statistics, or specific comparisons
-   - Make queries specific enough to find targeted information
-   - Example: Instead of "What are the exact player counts?" use "powerlifting Olympic lifting player statistics 2024"
-   - Example: Instead of "How do retention rates compare?" use "powerlifting vs Olympic lifting injury rates statistics comparison"
-   - Format as search queries, not questions
+3. **Knowledge Gaps**: Identify 1-3 HIGHLY SPECIFIC, ACTIONABLE search queries:
+   - ONLY include gaps that address MISSING CRITICAL INFORMATION for the expected subtopics
+   - Each gap must be:
+     ✅ Specific enough to find targeted data (include year, location, organization names when relevant)
+     ✅ Different from existing research queries (check what was already searched)
+     ✅ Actually answerable via web search (not opinion-based or requiring expert interviews)
+   - Examples of GOOD gaps:
+     ✅ "USA Powerlifting USAPL membership statistics 2023 2024"
+     ✅ "Olympic weightlifting vs powerlifting injury rate comparison study"
+     ✅ "IPF World Championships prize money athlete earnings 2024"
+   - Examples of BAD gaps:
+     ❌ "powerlifting community culture" (too vague, already covered)
+     ❌ "how athletes feel about training" (opinion-based, not fact-based)
+     ❌ "general biomechanics research" (not specific enough)
+   - Format as search queries optimized for finding specific data, NOT as questions
 
 4. **Needs Deeper Research**: Should we do another research round?
-   - TRUE if: coverage < 0.75 OR significant gaps exist OR important entities need investigation OR missing specific data/statistics
-   - FALSE if: coverage >= 0.75 AND all subtopics well-addressed AND sufficient specific examples/data present
-   - Be STRICT: Coverage of 0.5-0.7 means significant gaps still exist and more research is needed
+   - TRUE if: coverage < 0.60 (weak/poor) OR critical gaps exist (missing core subtopic data/statistics)
+   - MAYBE (treat as TRUE) if: coverage 0.60-0.74 (moderate) AND high-value entities/gaps identified
+   - FALSE if: coverage >= 0.75 (good) OR no actionable gaps/entities remain
+   - BE BALANCED: Moderate coverage (0.60-0.74) with 1-2 targeted improvements is often sufficient
 
 5. **Reasoning**: Brief explanation (1-2 sentences)
 
@@ -671,12 +685,13 @@ async def deep_dive_research(state: SubResearcherGraphState) -> dict:
     max_results = state.get("max_search_results", 3)
     main_topic = state.get("main_topic", "")
     shared_pool = state.get("shared_research_pool", {})
+    research_plan = state.get("research_plan", [])
 
     if not discovered_entities and not knowledge_gaps:
         print(f"[DEEP DIVE] No gaps or entities to research")
         return {}
 
-    # CHECK SHARED POOL: Filter out entities already researched by other sections
+    # DEDUPLICATION #1: Check shared pool for entities already researched by other sections
     already_researched = shared_pool.get("researched_entities", {})
     new_entities = []
     reused_entities = []
@@ -690,12 +705,51 @@ async def deep_dive_research(state: SubResearcherGraphState) -> dict:
     if reused_entities:
         print(f"[DEEP DIVE - SHARED POOL] Reusing research for {len(reused_entities)} entities: {', '.join(reused_entities[:3])}")
 
+    # DEDUPLICATION #2: Check if gaps are similar to already executed searches
+    existing_queries = set()
+    for plan_item in research_plan:
+        query = plan_item.get("query", "").lower()
+        existing_queries.add(query)
+
+    # Check shared pool for previous searches too
+    cached_searches = shared_pool.get("search_cache", {})
+    for cached_query in cached_searches.keys():
+        existing_queries.add(cached_query.lower())
+
+    deduplicated_gaps = []
+    duplicate_gaps = []
+
+    for gap in knowledge_gaps:
+        gap_lower = gap.lower()
+        # Check if this gap is too similar to existing queries
+        is_duplicate = False
+        for existing_query in existing_queries:
+            # Simple similarity check: if gap contains most words from existing query, it's likely duplicate
+            gap_words = set(gap_lower.split())
+            query_words = set(existing_query.split())
+            overlap = len(gap_words & query_words)
+            total = len(gap_words | query_words)
+
+            if overlap / max(total, 1) > 0.6:  # 60% word overlap = duplicate
+                is_duplicate = True
+                duplicate_gaps.append(gap)
+                break
+
+        if not is_duplicate:
+            deduplicated_gaps.append(gap)
+
+    if duplicate_gaps:
+        print(f"[DEEP DIVE - DEDUP] Skipping {len(duplicate_gaps)} redundant gap searches (already covered by previous searches)")
+        print(f"  Examples: {', '.join(duplicate_gaps[:2])}")
+
+    knowledge_gaps = deduplicated_gaps  # Only research unique gaps
+
     if new_entities:
-        print(f"[DEEP DIVE] Researching {len(new_entities)} NEW entities + {len(knowledge_gaps)} gaps...")
+        print(f"[DEEP DIVE] Researching {len(new_entities)} NEW entities + {len(knowledge_gaps)} unique gaps...")
     elif knowledge_gaps:
-        print(f"[DEEP DIVE] Researching {len(knowledge_gaps)} gaps (all entities already researched)...")
+        print(f"[DEEP DIVE] Researching {len(knowledge_gaps)} unique gaps (all entities already researched)...")
     else:
-        print(f"[DEEP DIVE] All entities already researched, no gaps to fill")
+        print(f"[DEEP DIVE] All entities already researched, no unique gaps to fill")
         return {}
 
     discovered_entities = new_entities  # Only research new entities

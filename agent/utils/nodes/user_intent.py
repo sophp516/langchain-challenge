@@ -8,14 +8,17 @@ from utils.configuration import get_config_from_configurable
 
 async def check_user_intent(state: dict) -> dict:
     """
-    Check user intent at entry point.
+    Check user intent at entry point with conversational context awareness.
     Routes to either:
     - "new_research": User wants to research a topic
     - "retrieve_report": User wants to get a specific report
     - "list_reports": User wants to see available reports
+    - "revise_report": User wants to revise an existing report
     """
     topic = state.get("topic", "")
     messages = state.get("messages", [])
+    last_viewed_report_id = state.get("last_viewed_report_id", "")
+    last_action = state.get("last_action", "")
 
     # Get query from topic or last message
     query = topic
@@ -29,6 +32,7 @@ async def check_user_intent(state: dict) -> dict:
         return {"user_intent": "new_research"}
 
     print(f"check_user_intent: analyzing query='{query[:50]}...'")
+    print(f"check_user_intent: context - last_viewed_report_id={last_viewed_report_id}, last_action={last_action}")
 
     # Create structured output for intent classification
     IntentOutput = create_model(
@@ -41,10 +45,15 @@ async def check_user_intent(state: dict) -> dict:
 
     structured_llm = llm.with_structured_output(IntentOutput)
 
+    # Build context string for LLM
+    context_info = ""
+    if last_viewed_report_id:
+        context_info = f"\n\nCONVERSATIONAL CONTEXT:\n- Last viewed report: {last_viewed_report_id}\n- Last action: {last_action}\n- If the user mentions 'the report', 'this report', or uses revision keywords (change, update, modify) WITHOUT specifying a report_id, they likely mean report '{last_viewed_report_id}'"
+
     classification_prompt = f"""
     Analyze the user query and determine their intent.
 
-    Query: "{query}"
+    Query: "{query}"{context_info}
 
     Classify into ONE category:
 
@@ -54,15 +63,22 @@ async def check_user_intent(state: dict) -> dict:
     2. "list_reports" - User wants to see available reports or versions
        Examples: "what reports do I have?", "show all reports", "list my reports"
 
-    3. "new_research" - User wants to START NEW research (DEFAULT for ambiguous)
+    3. "revise_report" - User wants to REVISE/MODIFY an existing report
+       Examples: "revise report abc123 with...", "update report xyz to include...", "improve report abc by..."
+       Keywords: revise, update, modify, improve, change, edit, add, remove, fix
+       IMPORTANT: If user says "change the title", "add X", "update Y" without a report_id, use the report from context
+
+    4. "new_research" - User wants to START NEW research (DEFAULT for ambiguous)
        Examples: "research AI", "tell me about climate change", any topic
 
-    IMPORTANT: If unsure, default to "new_research".
-    Extract report_id if mentioned (e.g., "report_abc123" → "report_abc123").
+    IMPORTANT:
+    - If unsure, default to "new_research".
+    - Extract report_id if mentioned explicitly (e.g., "report_abc123" → "report_abc123").
+    - If no report_id mentioned but context shows a recently viewed report, use that report_id for revise_report intent.
     """
 
     response = await structured_llm.ainvoke([
-        SystemMessage(content="You classify user intent: retrieve_report, list_reports, or new_research."),
+        SystemMessage(content="You classify user intent: retrieve_report, list_reports, revise_report, or new_research."),
         HumanMessage(content=classification_prompt)
     ])
 
@@ -70,9 +86,14 @@ async def check_user_intent(state: dict) -> dict:
     report_id = response.extracted_report_id.strip() if response.extracted_report_id else ""
 
     # Validate intent
-    valid_intents = ["retrieve_report", "list_reports", "new_research"]
+    valid_intents = ["retrieve_report", "list_reports", "revise_report", "new_research"]
     if intent not in valid_intents:
         intent = "new_research"
+
+    # CONTEXT FALLBACK: If intent is revise_report but no report_id was extracted, use last viewed report
+    if intent == "revise_report" and not report_id and last_viewed_report_id:
+        report_id = last_viewed_report_id
+        print(f"check_user_intent: no report_id in query, using last_viewed_report_id={report_id}")
 
     print(f"check_user_intent: intent={intent}, report_id={report_id}, confidence={response.confidence:.2f}")
 
@@ -199,7 +220,8 @@ async def check_initial_context(state: dict, config: RunnableConfig) -> dict:
             finalized_topic += " " + " ".join(user_responses)
         return {
             "is_finalized": True,
-            "topic": finalized_topic.strip()
+            "topic": finalized_topic.strip(),
+            "messages": [HumanMessage(content=f"Thank you. I will now start research on topic: {finalized_topic}")]
         }
 
     # Not sufficient - store the pre-generated question for generate_clarification to use

@@ -7,11 +7,11 @@ def route_after_intent_check(state: dict) -> str:
     """
     Route based on user intent.
     - new_research -> continue to research flow
-    - retrieve_report/list_reports -> go to tools
+    - retrieve_report/list_reports/revise_report -> go to tools
     """
     intent = state.get("user_intent", "new_research")
 
-    if intent in ["retrieve_report", "list_reports"]:
+    if intent in ["retrieve_report", "list_reports", "revise_report"]:
         print(f"route_after_intent_check: routing to 'tools' for intent={intent}")
         return "tools"
     else:

@@ -1,4 +1,4 @@
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
 from langgraph.prebuilt import ToolNode
 from utils.tools import report_tools
 from utils.model import llm
@@ -62,6 +62,8 @@ async def execute_and_format_tools(state: dict) -> dict:
     """
     intent = state.get("user_intent", "")
     report_id = state.get("intent_report_id", "")
+    topic = state.get("topic", "")
+    messages = state.get("messages", [])
 
     # Create tool call directly based on intent (same logic as call_report_tools)
     tool_calls = []
@@ -80,6 +82,35 @@ async def execute_and_format_tools(state: dict) -> dict:
         tool_calls = [{
             "name": "list_all_reports",
             "args": {"limit": 20},
+            "id": "call_1"
+        }]
+    elif intent == "revise_report":
+        if not report_id:
+            return {
+                "messages": [AIMessage(content="Please provide a report ID to revise. Example: revise report_abc123 with feedback...")]
+            }
+
+        # Extract feedback from user's message
+        # Get the original query from topic or last HumanMessage
+        user_query = topic
+        if not user_query and messages:
+            for msg in reversed(messages):
+                if isinstance(msg, HumanMessage):
+                    user_query = msg.content
+                    break
+
+        # Extract feedback by removing the report_id and command words
+        feedback = user_query
+        for keyword in ["revise", "update", "modify", "improve", "change", "edit", "report", report_id]:
+            feedback = feedback.replace(keyword, "")
+        feedback = feedback.strip().lstrip("with").strip()
+
+        if not feedback:
+            feedback = "Please improve the report quality and add more details."
+
+        tool_calls = [{
+            "name": "revise_report",
+            "args": {"report_id": report_id, "feedback": feedback},
             "id": "call_1"
         }]
     else:
@@ -110,15 +141,46 @@ async def execute_and_format_tools(state: dict) -> dict:
         return {**tool_result, "messages": merged_state["messages"] + [AIMessage(content="No results found.")]}
 
     # Format based on result type
+    # Track state updates separately
+    state_updates = {}
+
     if isinstance(tool_result_data, dict):
         if tool_result_data.get("error"):
             response_text = f"Error: {tool_result_data['error']}"
+        elif tool_result_data.get("success") and tool_result_data.get("content"):
+            # Handle revise_report response
+            report_id = tool_result_data.get('report_id', 'Unknown')
+            version_id = tool_result_data.get('version_id', 'N/A')
+            previous_version = tool_result_data.get('previous_version', 'N/A')
+            content = tool_result_data.get('content', 'No content available')
+
+            # Update state with revised report content
+            state_updates["report_content"] = content
+            state_updates["report_id"] = report_id
+            state_updates["version_id"] = version_id
+            state_updates["last_viewed_report_id"] = report_id  # Track context
+            state_updates["last_action"] = "revised_report"
+
+            response_text = f"""## ✏️ Revised Report: {report_id}
+
+**New Version:** {version_id} (revised from version {previous_version})
+
+---
+
+{content}"""
         elif tool_result_data.get("found") and tool_result_data.get("content"):
-            # Format report with better visual hierarchy
+            # Format report with better visual hierarchy (get_report response)
             report_id = tool_result_data.get('report_id', 'Unknown')
             version_id = tool_result_data.get('version_id', 'N/A')
             created_at = tool_result_data.get('created_at', 'Unknown date')
             content = tool_result_data.get('content', 'No content available')
+
+            # Update state with fetched report content
+            state_updates["report_content"] = content
+            state_updates["report_id"] = report_id
+            state_updates["version_id"] = version_id
+            state_updates["last_viewed_report_id"] = report_id  # Track context
+            state_updates["last_action"] = "viewed_report"
 
             response_text = f"""## 📄 Report: {report_id}
 
@@ -138,7 +200,7 @@ async def execute_and_format_tools(state: dict) -> dict:
             response_text = f"""## 📋 Versions of Report: {report_id}
 
 {versions_text}"""
-        elif tool_result.get("reports"):
+        elif tool_result_data.get("reports"):
             total_reports = tool_result_data.get('total_reports', 0)
             reports = tool_result_data.get("reports", [])
             reports_text = "\n".join([
@@ -157,4 +219,9 @@ async def execute_and_format_tools(state: dict) -> dict:
 
     print(f"execute_and_format_tools: executed tools and formatted response")
 
-    return {**tool_result, "messages": merged_state["messages"] + [AIMessage(content=response_text)]}
+    # Return with state updates if any
+    return {
+        **tool_result,
+        **state_updates,  # Include state updates (report_content, report_id, version_id)
+        "messages": merged_state["messages"] + [AIMessage(content=response_text)]
+    }

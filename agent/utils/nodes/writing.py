@@ -150,8 +150,6 @@ async def write_single_section(
 - Reference and build upon specific facts, names, and details mentioned in previous sections
 - Continue the narrative flow - don't start from scratch as if nothing was written before
 - Add NEW information that extends or deepens the analysis (not repeat what was already said)
-- Use phrases like "As mentioned in [previous section]...", "Building on the [X] discussed above...", "These [entities] face..."
-- If previous sections introduced specific entities (games, companies, people, products), reference them by name in your section
 - Focus on answering the MAIN RESEARCH QUESTION with specific, concrete details from your sources
 """
 
@@ -699,6 +697,40 @@ async def write_outline(state: dict, config: RunnableConfig) -> dict:
         - primary_query: One broad search combining the topic + section title
         - targeted_searches: 3-5 focused searches for the subtopics (with priority: high/medium/low)
         - This saves an additional LLM call during research phase
+
+        **CRITICAL QUERY SPECIFICITY RULES (for high-quality research):**
+        When creating research queries, ALWAYS include:
+        1. **Location specificity**: If the topic mentions a country/region, include it in EVERY query
+           - ✅ GOOD: "Japan elderly consumption housing 2024 statistics"
+           - ❌ BAD: "elderly housing consumption patterns"
+        2. **Data type specificity**: Explicitly request quantitative data
+           - ✅ GOOD: "Japan elderly population 2020-2050 projections statistics"
+           - ❌ BAD: "Japan aging population trends"
+        3. **Market size specificity**: For market analysis, request dollar/yen amounts
+           - ✅ GOOD: "Japan elderly clothing market size revenue 2024 yen"
+           - ❌ BAD: "elderly clothing market Japan"
+        4. **Year/timeframe specificity**: Include exact years or ranges
+           - ✅ GOOD: "Japan elderly consumption 2020 2025 2030 projections"
+           - ❌ BAD: "Japan future elderly consumption"
+        5. **Official source targeting**: Include keywords that find authoritative data
+           - ✅ GOOD: "Japan Ministry Internal Affairs elderly expenditure survey 2024"
+           - ✅ GOOD: "OECD Japan elderly spending data statistics"
+           - ❌ BAD: "Japan elderly spending information"
+
+        Examples of GOOD vs BAD research queries:
+        Topic: "Market size analysis for elderly consumption in Japan 2020-2050"
+
+        ❌ BAD queries (too generic, get irrelevant results):
+        - "elderly consumption patterns"
+        - "aging population market opportunities"
+        - "senior consumer behavior"
+
+        ✅ GOOD queries (specific, get targeted data):
+        - "Japan elderly population 2020 2030 2050 projections Ministry statistics"
+        - "Japan elderly housing expenditure market size 2024 yen revenue"
+        - "Japan elderly food consumption spending statistics 2023 2024"
+        - "Japan transportation elderly market size accessible vehicles 2024"
+        - "Japan Ministry Internal Affairs elderly household spending survey 2024"
         """
 
     messages = [
