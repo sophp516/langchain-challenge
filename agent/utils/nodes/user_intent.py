@@ -103,15 +103,20 @@ async def check_user_intent(state: dict) -> dict:
     }
 
 
-def check_initial_context(state: dict, config: RunnableConfig) -> dict:
+async def check_initial_context(state: dict, config: RunnableConfig) -> dict:
     """
-    Check if initial topic has enough context to proceed.
-    If sufficient, mark as finalized. If not, prepare for clarification loop.
+    OPTIMIZED: Check if initial topic has enough context to proceed.
+    If insufficient, generates the clarification question in the SAME LLM call (cost savings).
+    The question is stored in state but NOT added to messages yet (generate_clarification does that).
     """
     agent_config = get_config_from_configurable(config.get("configurable", {}))
 
     topic = state.get("topic", "")
-    print(f"check_initial_context: topic='{topic[:50]}...', max_clarification_rounds={agent_config.max_clarification_rounds}")
+    clarification_rounds = state.get("clarification_rounds", 0)
+    clarification_questions = state.get("clarification_questions", [])
+    user_responses = state.get("user_responses", [])
+
+    print(f"check_initial_context: topic='{topic[:50]}...', round={clarification_rounds}, max_clarification_rounds={agent_config.max_clarification_rounds}")
 
     # If clarification is disabled (max_clarification_rounds = 0), skip validation and proceed
     if agent_config.max_clarification_rounds == 0:
@@ -120,17 +125,45 @@ def check_initial_context(state: dict, config: RunnableConfig) -> dict:
             "is_finalized": True
         }
 
+    # If we've asked too many questions, finalize with what we have
+    if clarification_rounds >= agent_config.max_clarification_rounds:
+        print(f"check_initial_context: max rounds reached ({agent_config.max_clarification_rounds}), finalizing")
+        finalized_topic = topic
+        if user_responses:
+            finalized_topic += " " + " ".join(user_responses)
+        return {
+            "is_finalized": True,
+            "topic": finalized_topic.strip(),
+            "clarification_rounds": clarification_rounds
+        }
+
     if not topic or len(topic.strip()) == 0:
         print("check_initial_context: no topic found, returning is_finalized=False")
         return {
-            "is_finalized": False
+            "is_finalized": False,
+            "pending_clarification_question": "What would you like to research?"
         }
 
+    # Build context with all Q&A so far
+    context = f"Topic: {topic}\n"
+    if clarification_questions and user_responses:
+        context += "\nPrevious Q&A:\n"
+        for i, (q, r) in enumerate(zip(clarification_questions, user_responses)):
+            context += f"Q{i+1}: {q}\nA{i+1}: {r}\n"
+
+    # OPTIMIZATION: Single LLM call for both evaluation AND question generation
+    TopicEvaluation = create_model(
+        'TopicEvaluation',
+        is_sufficient=(bool, ...),
+        reasoning=(str, ...),
+        clarifying_question=(str, ...)  # Empty string if sufficient
+    )
+    topic_evaluation_llm = llm.with_structured_output(TopicEvaluation)
 
     evaluation_prompt = f"""
     You are a research coordinator. Evaluate if the following is a valid research topic that can be researched.
 
-    Topic: "{topic}"
+    {context}
 
     The topic is SUFFICIENT if it:
     1. Is a clear research question or subject (NOT a greeting, command, or casual message)
@@ -153,70 +186,7 @@ def check_initial_context(state: dict, config: RunnableConfig) -> dict:
     - "games" (too vague, no constraint)
     - "tell me about stuff"
 
-    Respond with ONLY "SUFFICIENT" or "INSUFFICIENT" followed by a brief reason (one sentence).
-    """
-
-    messages = [
-        SystemMessage(content="You are a research coordinator. Accept any topic that has a clear subject and at least one constraint (time, place, category, scope). Only reject greetings and completely vague requests."),
-        HumanMessage(content=evaluation_prompt)
-    ]
-
-    response = llm.invoke(messages)
-    evaluation = response.content.strip() if hasattr(response, 'content') else str(response).strip()
-
-    # Check if context is sufficient (must explicitly say SUFFICIENT)
-    is_sufficient = evaluation.upper().startswith("SUFFICIENT")
-    print(f"check_initial_context: evaluation={is_sufficient}, response='{evaluation[:150]}...'")
-
-    return {
-        "is_finalized": is_sufficient
-    }
-
-
-async def generate_clarification_question(state: dict, config: RunnableConfig) -> dict:
-    """
-    Generate a clarification question based on current topic and previous responses.
-    This node uses LLM to determine what information is still needed.
-    Also validates if we have enough context after receiving user responses.
-    """
-    agent_config = get_config_from_configurable(config.get("configurable", {}))
-
-    clarification_rounds = state.get("clarification_rounds", 0)
-    topic = state.get("topic", "")
-    clarification_questions = state.get("clarification_questions", [])
-    user_responses = state.get("user_responses", [])
-
-    print(f"generate_clarification_question: round={clarification_rounds}, topic='{topic[:50]}...'")
-
-    # If we've asked too many questions, finalize with what we have
-    if clarification_rounds >= agent_config.max_clarification_rounds:
-        print(f"generate_clarification_question: max rounds reached ({agent_config.max_clarification_rounds}), finalizing")
-        # Build finalized topic from existing context
-        finalized_topic = topic
-        if user_responses:
-            finalized_topic += " " + " ".join(user_responses)
-        return {
-            "is_finalized": True,
-            "topic": finalized_topic.strip(),
-            "clarification_rounds": clarification_rounds
-        }
-
-    # Build context with all Q&A so far
-    context = f"Topic: {topic}\n"
-    if clarification_questions and user_responses:
-        context += "\nPrevious Q&A:\n"
-        for i, (q, r) in enumerate(zip(clarification_questions, user_responses)):
-            context += f"Q{i+1}: {q}\nA{i+1}: {r}\n"
-
-    # Generate a clarification question OR determine if we have enough context
-    clarification_prompt = f"""
-    You are a research assistant helping to clarify a research topic.
-
-    Current topic: {topic}
-
-    {context if user_responses else "This is the initial topic."}
-
-    CRITICAL RULES - ONLY ask for information that CANNOT be researched:
+    CRITICAL RULES - If insufficient, ONLY ask for information that CANNOT be researched:
     1. DO NOT ask about information already present in the topic or previous responses
     2. DO NOT ask about standard metrics, criteria, definitions, or methodologies - these can be researched
     3. DO NOT ask "What metrics are used?" or "What criteria determine X?" - research can find this
@@ -228,47 +198,68 @@ async def generate_clarification_question(state: dict, config: RunnableConfig) -
     - Missing constraints that are user choices (e.g., "What time period?" if not mentioned)
     - Ambiguities that require user input (e.g., "Do you mean X or Y?" when both are possible)
 
-    If the topic has a clear subject, respond with "ENOUGH_CONTEXT"
-
-    Examples:
-    - Topic "most popular X of 2025" + user said "criteria A and criteria B" → ENOUGH_CONTEXT (agent can research what metrics are used)
-    - Topic "MMORPG games in 2026" → ENOUGH_CONTEXT (has subject + time)
-    - Topic "games" → Ask "What type of games or time period?" (missing constraint)
-    - Topic "best practices" → Ask "Which domain or field?" (missing subject scope)
-
-    Return ONLY the question (or "ENOUGH_CONTEXT"), nothing else.
+    If is_sufficient=True, set clarifying_question to empty string "".
+    If is_sufficient=False, provide a specific clarifying question.
     """
 
     messages = [
-        SystemMessage(content="You are a helpful research assistant. You ONLY ask for information that requires user input and cannot be discovered through research. You do NOT ask about standard metrics, criteria, definitions, or methodologies - these can be researched. Be conservative - if the topic has a clear subject and constraints, mark it as ENOUGH_CONTEXT."),
-        HumanMessage(content=clarification_prompt)
+        SystemMessage(content="You are a research coordinator. Accept any topic that has a clear subject and at least one constraint (time, place, category, scope). Only reject greetings and completely vague requests. You ONLY ask for information that requires user input and cannot be discovered through research."),
+        HumanMessage(content=evaluation_prompt)
     ]
 
-    response = await llm.ainvoke(messages)
-    question = response.content.strip() if hasattr(response, 'content') else str(response).strip()
+    response = await topic_evaluation_llm.ainvoke(messages)
+    is_sufficient = response.is_sufficient
+    question = response.clarifying_question.strip()
 
-    # Check if we have enough context
-    if question.upper() == "ENOUGH_CONTEXT" or "enough context" in question.lower():
-        print("generate_clarification_question: LLM indicated enough context, finalizing")
-        # Build finalized topic incorporating user responses
+    print(f"check_initial_context: is_sufficient={is_sufficient}, reasoning='{response.reasoning[:100]}...'")
+
+    # If sufficient, mark as finalized
+    if is_sufficient:
         finalized_topic = topic
         if user_responses:
             finalized_topic += " " + " ".join(user_responses)
         return {
             "is_finalized": True,
             "topic": finalized_topic.strip(),
-            "clarification_rounds": clarification_rounds
+            "messages": [HumanMessage(content=f"Thank you. I will now start research on topic: {finalized_topic}")]
         }
 
-    # Not enough context yet, ask another question
-    new_questions = clarification_questions + [question]
-    print(f"generate_clarification_question: generated question='{question[:100]}...'")
-    clarification_question = AIMessage(content=question)
+    # Not sufficient - store the pre-generated question for generate_clarification to use
+    if question:
+        print(f"check_initial_context: generated question='{question[:100]}...'")
+        return {
+            "is_finalized": False,
+            "pending_clarification_question": question  # Store for next node to add to messages
+        }
+
+    # Fallback: if no question generated but marked insufficient, finalize anyway
+    print("check_initial_context: marked insufficient but no question generated, finalizing")
+    return {
+        "is_finalized": True,
+        "topic": topic.strip()
+    }
+
+
+def generate_clarification_question(state: dict, config: RunnableConfig) -> dict:
+    """
+    OPTIMIZED: This node now simply takes the pre-generated question from check_initial_context
+    and adds it to messages. No LLM call needed here - saves 50% cost on clarification loop!
+    """
+    clarification_rounds = state.get("clarification_rounds", 0)
+    clarification_questions = state.get("clarification_questions", [])
+    pending_question = state.get("pending_clarification_question", "")
+
+    print(f"generate_clarification_question: using pre-generated question='{pending_question[:100]}...'")
+
+    # Add the pre-generated question to messages and tracking
+    new_questions = clarification_questions + [pending_question]
+    clarification_message = AIMessage(content=pending_question)
 
     return {
-        "messages": [clarification_question],
+        "messages": [clarification_message],
         "clarification_questions": new_questions,
-        "clarification_rounds": clarification_rounds + 1
+        "clarification_rounds": clarification_rounds + 1,
+        "pending_clarification_question": ""  # Clear the pending question
     }
 
 

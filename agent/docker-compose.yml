@@ -1,0 +1,103 @@
+version: '3.8'
+
+services:
+  # MongoDB service (required by backend)
+  mongodb:
+    image: mongo:7
+    container_name: langchain-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: langchain_challenge
+    networks:
+      - langchain-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend service (Express + MongoDB)
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: langchain-backend
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - MONGODB_URI=mongodb://mongodb:27017/langchain_challenge
+      - NODE_ENV=production
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - langchain-network
+    volumes:
+      - ../backend:/app
+      - /app/node_modules
+    restart: unless-stopped
+
+  # Agent service (LangGraph)
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: langchain-agent
+    ports:
+      - "2024:2024"
+    environment:
+      - PORT=2024
+      # Add your API keys via .env file or environment variables
+      # - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # - TAVILY_API_KEY=${TAVILY_API_KEY}
+      # - SERPER_API_KEY=${SERPER_API_KEY}
+      # - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      # - FIRECRAWL_API_KEY=${FIRECRAWL_API_KEY}
+    .env:
+      - .env
+    networks:
+      - langchain-network
+    volumes:
+      - .:/app
+      - agent_data:/app/.langgraph
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2024/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # UI service (React + Vite)
+  ui:
+    build:
+      context: ../ui
+      dockerfile: Dockerfile
+    container_name: langchain-ui
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:2024
+      - VITE_BACKEND_URL=http://localhost:3001
+    depends_on:
+      - backend
+      - agent
+    networks:
+      - langchain-network
+    volumes:
+      - ../ui:/app
+      - /app/node_modules
+    restart: unless-stopped
+
+volumes:
+  mongodb_data:
+  agent_data:
+
+networks:
+  langchain-network:
+    driver: bridge
+

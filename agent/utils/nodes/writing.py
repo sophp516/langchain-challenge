@@ -1,125 +1,13 @@
 from langgraph.types import RunnableConfig
 from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
 from utils.model import llm, llm_quality
-from utils.configuration import get_config_from_configurable, tavily_client, serper_client
+from utils.configuration import get_config_from_configurable, tavily_client
 from utils.subresearcher import subresearcher_graph
 from utils.db import save_report
 from .helpers import format_source_as_markdown_link
+from pydantic import create_model
 import re, json, asyncio, uuid
 
-
-async def generate_outline(state: dict) -> dict:
-    """
-    Generate a structured outline for the report based on the question.
-    Creates sections that will each be researched by a dedicated subresearcher.
-    """
-
-    topic = state.get("topic", "")
-    revision_count = state.get("revision_count", 0)
-
-    print(f"generate_outline: creating outline for topic='{topic}...' (revision {revision_count})")
-
-    outline_prompt = f"""
-    You are a report outline specialist. Create a structured outline that DIRECTLY ANSWERS the main research question.
-
-    MAIN RESEARCH QUESTION: {topic}
-
-    CRITICAL: First, determine what TYPE of question this is, then organize sections accordingly:
-
-    **TYPE A - ENTITY-FOCUSED** (listing/comparing specific items):
-    Examples: "Best mobile games 2024", "Top K-pop songs", "MMORPG recommendations", "Leading AI companies"
-
-    **CRITICAL FOR TYPE A - USE THEMATIC GROUPING, NOT ONE-PER-ENTITY:**
-    - DO NOT create one section per entity (this leads to incomplete coverage)
-    - Instead, create 2-4 THEMATIC sections that each cover MULTIPLE entities
-    - Example for "MMORPGs in 2025":
-      ❌ BAD: "WoW", "FFXIV", "GW2" (individual sections = incomplete coverage)
-      ✅ GOOD: "Established MMORPGs with Expansions", "Emerging MMORPGs", "Gameplay Innovation Trends"
-    - Each thematic section should discuss 3-5+ entities with comparisons
-    - This ensures comprehensive coverage and prevents cherry-picking
-
-    **TYPE B - THEMATIC/ANALYTICAL** (explaining concepts, comparing philosophies, analyzing impacts):
-    Examples: "Investment philosophies of Buffett vs Munger", "Impact of AI on labor", "HGT in eukaryotes"
-    → Create sections by KEY THEMES/ASPECTS that answer the question
-    → Section titles = Themes/dimensions (e.g., "Risk Management", "Portfolio Construction", "Decision Process")
-    → Synthesize findings across subtopics for each theme
-
-    **TYPE C - MARKET/TECHNICAL ANALYSIS** (sizing markets, evaluating technologies, comparing methods):
-    Examples: "Elderly consumption Japan 2020-2050", "Scaling quantum computing", "SRAM stability methods"
-    → Structure by ANALYTICAL COMPONENTS
-    → Section titles = Analysis dimensions (e.g., "Market Size", "Technology Roadmap", "Implementation")
-
-    **TYPE D - COMPREHENSIVE RESEARCH** (multi-faceted exploration of complex topics):
-    Examples: "AI in K-12 education", "Gut microbiota and cancer", "Bird migration navigation"
-    → Organize by LOGICAL FLOW (background → mechanisms → applications → implications)
-    → Build from foundational concepts to specific findings
-
-    STRUCTURE (adapt to type):
-    1. Executive Summary - Key findings/direct answer
-    2. Main sections (2-5):
-       - TYPE A: One per discovered entity
-       - TYPE B/C/D: One per theme/aspect/component
-    3. Conclusion - Synthesis and implications
-
-    For each section:
-    - Title: Entity name OR theme/aspect
-    - Subtopics: Which research contains relevant data
-    - Key questions: What this section should answer
-
-    Return JSON:
-    {{
-      "sections": [
-        {{
-          "title": "Section Title",
-          "subtopics": ["subtopic1", "subtopic2"],
-        }}
-      ]
-    }}
-    """
-
-    messages = [
-        SystemMessage(
-            content="You are an expert report outline specialist. Create comprehensive, well-structured outlines that ensure complete coverage, logical flow, and clear organization. Focus on creating outlines that will result in high-quality reports with excellent coverage, evidence, structure, and clarity."),
-        HumanMessage(content=outline_prompt)
-    ]
-
-    response = await llm.ainvoke(messages)
-    response_text = response.content if hasattr(response, 'content') else str(response)
-
-    # Parse JSON outline (simplified)
-    try:
-        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-        if json_match:
-            outline = json.loads(json_match.group())
-        else:
-            # Fallback: create generic outline
-            outline = {
-                "sections": [
-                    {"title": "Executive Summary", "subtopics": []},
-                    {"title": "Main Analysis", "subtopics": []},
-                    {"title": "Conclusion", "subtopics": []}
-                ]
-            }
-    except Exception as e:
-        print(f"generate_outline: error parsing JSON, using fallback: {e}")
-        outline = {
-            "sections": [
-                {"title": "Executive Summary", "subtopics": []},
-                {"title": "Main Analysis", "subtopics": []},
-                {"title": "Conclusion", "subtopics": []}
-            ]
-        }
-
-    print(f"generate_outline: created outline with {len(outline.get('sections', []))} sections")
-
-    # DEBUG: Log the outline to see what subtopics are mapped
-    for section in outline.get("sections", []):
-        print(f"  Section: '{section.get('title', '')}' -> Subtopics: {section.get('subtopics', [])}")
-
-    return {
-        "report_outline": outline,
-        "report_sections": []
-    }
 
 
 async def search_for_section_sources(section_title: str, topic: str, search_api: str = "tavily",
@@ -127,21 +15,14 @@ async def search_for_section_sources(section_title: str, topic: str, search_api:
     """
     Perform a web search to find additional sources for a section.
     Used when existing research doesn't provide enough sources.
-    Respects the configured search API (tavily or serper).
+    Respects the configured search API
     """
     search_query = f"{section_title}"
     print(f"    Searching for additional sources: '{search_query[:50]}...'")
 
     try:
         loop = asyncio.get_event_loop()
-        if search_api == "serper":
-            search_results = await loop.run_in_executor(
-                None,
-                lambda: serper_client.search(query=search_query, max_results=num_results)
-            )
-            # SerperClient returns Tavily-compatible format
-            return search_results.get("results", [])
-        else:
+        if search_api == "tavily":
             search_results = await loop.run_in_executor(
                 None,
                 lambda: tavily_client.search(query=search_query, max_results=num_results)
@@ -160,7 +41,7 @@ async def write_single_section(
         all_sections: list = None,
         section_index: int = 0,
         previously_written_sections: list = None,
-        search_api: str = "serper"
+        search_api: str = "tavily"
 ) -> dict:
     """
     Write a single section of the report with citations.
@@ -191,7 +72,7 @@ async def write_single_section(
             research_depth = research_by_subtopic[subtopic].get("research_depth", 1)
             research_depth_info[subtopic] = research_depth
 
-            # IMPROVEMENT 1: Sort sources by credibility score (highest first)
+            # Sort sources by credibility score (highest first)
             credible_sources = [
                 (source, findings, credibilities.get(source, 0.5))
                 for source, findings in results.items()
@@ -199,7 +80,7 @@ async def write_single_section(
             ]
             credible_sources.sort(key=lambda x: x[2], reverse=True)  # Sort by credibility descending
 
-            # IMPROVEMENT 2: Categorize sources by type for better context
+            # Categorize sources by type for better context
             def categorize_source(source_url: str) -> str:
                 """Categorize source type based on URL"""
                 academic_domains = ['edu', 'scholar.google', 'arxiv.org', 'researchgate.net', 'ieee.org',
@@ -215,7 +96,7 @@ async def write_single_section(
                 else:
                     return "general"
 
-            # IMPROVEMENT 3: Expand to top 25 sources for comprehensive coverage
+            # Expand to top 25 sources for comprehensive coverage
             # Prioritize diverse source types for balanced perspective
             # With 45-56 sources available per section, using 25 ensures we capture
             # the full depth of multi-layer research while staying within token limits
@@ -269,8 +150,6 @@ async def write_single_section(
 - Reference and build upon specific facts, names, and details mentioned in previous sections
 - Continue the narrative flow - don't start from scratch as if nothing was written before
 - Add NEW information that extends or deepens the analysis (not repeat what was already said)
-- Use phrases like "As mentioned in [previous section]...", "Building on the [X] discussed above...", "These [entities] face..."
-- If previous sections introduced specific entities (games, companies, people, products), reference them by name in your section
 - Focus on answering the MAIN RESEARCH QUESTION with specific, concrete details from your sources
 """
 
@@ -340,6 +219,15 @@ async def write_single_section(
     - Cover key questions and subtopics assigned to this section
     - Include relevant details, examples, and context from sources
     - Don't leave important aspects unaddressed
+    
+    **CONCRETE EXAMPLES (REQUIRED):**
+    - DO NOT just describe concepts abstractly - provide SPECIFIC EXAMPLES from sources
+    - For morphological similarities: Give actual word examples showing the pattern
+      Example: ❌ "Both languages use agglutination"
+      Example: ✅ "Turkish forms 'eve' (to the house) by adding '-e' to 'ev' (house), while Korean uses '-로' in '집으로' (to the house) from '집' (house) [8]"
+    - For phonological features: Include specific sound examples or rules
+    - For lexical borrowings: List actual shared words if mentioned in sources
+    - Every major claim should have at least one concrete example from sources
 
     **COMPREHENSIVE COVERAGE - THIS IS CRITICAL FOR HIGH SCORES:**
 
@@ -392,6 +280,17 @@ async def write_single_section(
     - Use multiple sources to support important claims when available
     - Integrate citations naturally into the text
     - Provide specific examples and data from sources
+    
+    **BALANCE AND COUNTERARGUMENTS (CRITICAL FOR HIGH SCORES):**
+    - If sources present DEBATED or CONTROVERSIAL topics, you MUST present BOTH sides
+    - Include counterarguments, criticisms, and alternative viewpoints from sources
+    - Example: If discussing "Altaic hypothesis", include:
+      * Arguments FOR the hypothesis (similarities, shared features)
+      * Arguments AGAINST the hypothesis (lack of evidence, alternative explanations)
+      * Specific data/challenges mentioned in sources
+    - Use phrases like: "However, critics argue...", "Alternative theories suggest...", "Some researchers challenge this view..."
+    - DO NOT present only one side of a debate - this reduces credibility and comprehensiveness
+    - If sources mention skepticism or controversy, explicitly address it
 
     **STRUCTURE:**
     - Start with a clear topic sentence that introduces the section's focus
@@ -423,91 +322,79 @@ async def write_single_section(
     is_executive_summary = "executive summary" in section_title.lower()
     is_conclusion = "conclusion" in section_title.lower() or "recommendations" in section_title.lower()
 
+    # For Executive Summary, also generate a refined report title
     if is_executive_summary:
         section_prompt += "\n\n**EXECUTIVE SUMMARY REQUIREMENTS:**\n- Provide a concise, high-level overview of the entire report\n- Highlight the most important findings and conclusions\n- Summarize key insights from all sections\n- Keep it brief but comprehensive (2-3 paragraphs)\n- Write for a busy executive audience - clear and impactful"
+
+        # Use structured output to get both title and content
+        ReportWithTitle = create_model(
+            'ReportWithTitle',
+            report_title=(str, ...),  # Professional, refined title for the entire report
+            content=(str, ...)  # Executive summary content
+        )
+        llm_with_title = llm_quality.with_structured_output(ReportWithTitle)
+
+        section_prompt += f"\n\n**REPORT TITLE GENERATION:**\n- Also provide a professional, refined title for the ENTIRE REPORT (not just this section)\n- The report is about: \"{topic}\"\n- Make it clear, specific, and professional\n- Example: If topic is \"MMORPG games 2025\", title could be \"State of MMORPGs in 2025: Market Analysis and Player Trends\"\n- Return in 'report_title' field"
+
+        messages = [
+            SystemMessage(
+                content="You are an expert research report writer. CRITICAL: You MUST only write information that explicitly appears in the provided sources. DO NOT use your knowledge to add facts, names, dates, or statistics. Every factual claim must be directly traceable to a source. Hallucination is unacceptable. Additionally, focus on writing high-quality, well-structured content that excels in coverage, evidence, structure, and clarity."),
+            HumanMessage(content=section_prompt)
+        ]
+
+        response = await llm_with_title.ainvoke(messages)
+        section_content = response.content
+        generated_title = response.report_title
+
     elif is_conclusion:
         section_prompt += "\n\n**CONCLUSION REQUIREMENTS:**\n- Synthesize findings from all sections\n- Draw clear, evidence-based conclusions\n- Provide actionable recommendations when applicable\n- Connect back to the research objectives\n- End with forward-looking statements or implications"
 
-    messages = [
-        SystemMessage(
-            content="You are an expert research report writer. CRITICAL: You MUST only write information that explicitly appears in the provided sources. DO NOT use your knowledge to add facts, names, dates, or statistics. Every factual claim must be directly traceable to a source. Hallucination is unacceptable. Additionally, focus on writing high-quality, well-structured content that excels in coverage, evidence, structure, and clarity."),
-        HumanMessage(content=section_prompt)
-    ]
-
-    # Validation: Check for forbidden vague phrases and enforce specificity
-    max_retries = 2
-    for attempt in range(max_retries):
-        response = await llm_quality.ainvoke(messages)
-        section_content = response.content if hasattr(response, 'content') else str(response)
-
-        # Check for forbidden phrases
-        forbidden_phrases = [
-            "several", "various", "multiple", "many", "some", "a number of",
-            "significant", "substantial", "considerable", "notable",
-            "emerging titles", "new games", "industry trends show", "research indicates"
+        messages = [
+            SystemMessage(
+                content="You are an expert research report writer. CRITICAL: You MUST only write information that explicitly appears in the provided sources. DO NOT use your knowledge to add facts, names, dates, or statistics. Every factual claim must be directly traceable to a source. Hallucination is unacceptable. Additionally, focus on writing high-quality, well-structured content that excels in coverage, evidence, structure, and clarity."),
+            HumanMessage(content=section_prompt)
         ]
 
-        content_lower = section_content.lower()
-        violations = [phrase for phrase in forbidden_phrases if phrase in content_lower]
+        response = await llm_quality.ainvoke(messages)
+        section_content = response.content if hasattr(response, 'content') else str(response)
+        generated_title = None
 
-        # Check citation density (should cite at least 30% of available sources)
-        citations = re.findall(r'\[\d+\]', section_content)
-        unique_citations = len(set(citations))
-        min_required_citations = max(len(sources_list) // 3, 5)
+    else:
+        messages = [
+            SystemMessage(
+                content="You are an expert research report writer. CRITICAL: You MUST only write information that explicitly appears in the provided sources. DO NOT use your knowledge to add facts, names, dates, or statistics. Every factual claim must be directly traceable to a source. Hallucination is unacceptable. Additionally, focus on writing high-quality, well-structured content that excels in coverage, evidence, structure, and clarity."),
+            HumanMessage(content=section_prompt)
+        ]
 
-        # Check for numerical data usage (should have at least 10 numbers in the section)
-        numbers_in_content = len(
-            re.findall(r'\d+(?:\.\d+)?[MBK]?\s*(?:million|billion|thousand|players|users|%|dollars)?', section_content))
+        response = await llm_quality.ainvoke(messages)
+        section_content = response.content if hasattr(response, 'content') else str(response)
+        generated_title = None
 
-        if violations or unique_citations < min_required_citations or numbers_in_content < 10:
-            print(f"      ⚠️  VALIDATION FAILED (attempt {attempt + 1}/{max_retries}):")
-            if violations:
-                print(f"         - Forbidden phrases found: {violations[:3]}")
-            if unique_citations < min_required_citations:
-                print(
-                    f"         - Insufficient citations: {unique_citations}/{len(sources_list)} (need {min_required_citations})")
-            if numbers_in_content < 10:
-                print(f"         - Insufficient numerical data: {numbers_in_content} numbers found (need 10+)")
+    citations_in_content = re.findall(r'\[(\d+)\]', section_content)
+    unique_citation_numbers = sorted(set(int(c) for c in citations_in_content))
 
-            if attempt < max_retries - 1:
-                print(f"         - Regenerating section with stricter prompt...")
-                # Add stricter validation message for retry
-                messages.append(AIMessage(content=section_content))
-                messages.append(HumanMessage(content=f"""
-VALIDATION FAILED. Your section was rejected for:
-{f"- Using forbidden vague phrases: {', '.join(violations[:3])}" if violations else ""}
-{f"- Only {unique_citations} citations out of {len(sources_list)} sources available (need {min_required_citations}+)" if unique_citations < min_required_citations else ""}
-{f"- Only {numbers_in_content} numbers/statistics found (need 10+ specific data points)" if numbers_in_content < 10 else ""}
+    # Map citation numbers to actual sources (1-indexed)
+    actually_cited_sources = []
+    for citation_num in unique_citation_numbers:
+        if 1 <= citation_num <= len(sources_list):
+            actually_cited_sources.append(sources_list[citation_num - 1])
 
-REGENERATE THIS SECTION with:
-1. NO vague words like "several", "various", "many", "significant", "notable"
-2. EVERY sentence must cite sources with [1], [2], etc.
-3. Include SPECIFIC numbers, dates, percentages from the sources
-4. Name ALL entities (games, companies, people) mentioned in sources
-5. Use AT LEAST {min_required_citations} different source citations
+    print(f"      Citations: {len(sources_list)} sources available, {len(actually_cited_sources)} actually cited")
 
-EXAMPLE OF WHAT IS REQUIRED:
-❌ BAD: "Several popular MMORPGs saw significant growth"
-✅ GOOD: "World of Warcraft grew from 5.2M to 6.1M players (+17.3%), Final Fantasy XIV increased from 3.1M to 3.8M players (+22.6%), and Elder Scrolls Online expanded from 1.9M to 2.3M players (+21%) between January-November 2025 [1][2][3]"
-
-Write the section again NOW with extreme specificity.
-"""))
-            else:
-                print(f"         - Max retries reached, accepting section with warnings")
-                break
-        else:
-            print(f"      ✓ VALIDATION PASSED:")
-            print(f"         - {unique_citations} unique citations (required: {min_required_citations})")
-            print(f"         - {numbers_in_content} numerical data points (required: 10)")
-            print(f"         - No forbidden vague phrases detected")
-            break
-
-    return {
+    result = {
         "title": section_title,
         "content": section_content,
-        "sources": sources_list,
+        "sources": actually_cited_sources,  # Only sources actually used
+        "all_available_sources": sources_list,
         "subtopics": section_subtopics
     }
+
+    # If this is Executive Summary, also return the generated report title
+    if is_executive_summary and generated_title:
+        result["report_title"] = generated_title
+        print(f"      Generated report title: {generated_title}")
+
+    return result
 
 
 async def write_sections_with_citations(state: dict, config: RunnableConfig) -> dict:
@@ -537,7 +424,7 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
         }
 
     print(f"write_sections_with_citations: Available research keys:")
-    for key in research_by_subtopic.keys():
+    for key in research_by_subtopic.keys(): # Key -> Subtopic
         results = research_by_subtopic[key]["results"]
         credibilities = research_by_subtopic[key]["credibilities"]
         num_sources = len(results)
@@ -562,16 +449,27 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
             min_credibility_score=agent_config.min_credibility_score,
             all_sections=sections,
             section_index=idx,
-            previously_written_sections=written_sections,  # Pass previously completed sections
-            search_api=agent_config.search_api  # Pass configured search API
+            previously_written_sections=written_sections,
+            search_api=agent_config.search_api
         )
         written_sections.append(section_result)
         print(f"  Completed section {idx + 1}/{len(sections)}: {section_result.get('title', 'Unknown')}")
 
     print(f"write_sections_with_citations: completed all {len(written_sections)} sections sequentially")
 
+    # Extract generated title from Executive Summary (if available)
+    generated_title = None
+    for section in written_sections:
+        if "report_title" in section:
+            generated_title = section["report_title"]
+            break
+
+    # Use generated title if available, otherwise fall back to raw topic
+    report_title = generated_title if generated_title else topic
+    print(f"write_sections_with_citations: Using report title: '{report_title}'")
+
     # Combine sections into full report
-    full_report = f"# {topic}\n\n"
+    full_report = f"# {report_title}\n\n"
     all_sources = []
 
     for section in written_sections:
@@ -585,6 +483,7 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
         formatted_source = format_source_as_markdown_link(source)
         full_report += f"[{i}] {formatted_source}\n"
 
+
     full_report_message = AIMessage(content=full_report)
 
     # Generate report_id if not exists
@@ -595,10 +494,24 @@ async def write_sections_with_citations(state: dict, config: RunnableConfig) -> 
 
     new_version_id = state.get("version_id", 0) + 1
 
-    # Save report to MongoDB with search results
+    # Save report to MongoDB with search results and metadata
     try:
-        await save_report(report_id, new_version_id, full_report, sub_researchers)
-        print(f"write_sections_with_citations: saved report {report_id} version {new_version_id} to MongoDB (with {len(sub_researchers)} search results)")
+        await save_report(
+            report_id=report_id,
+            version_id=new_version_id,
+            full_report=full_report,
+            report_title=report_title,  # Save generated title
+            search_results=research_by_subtopic,  # Save all search results for revision context
+            report_sections=[
+                {
+                    "title": s.get("title"),
+                    "subtopics": s.get("subtopics"),
+                    "source_count": len(s.get("sources", []))
+                }
+                for s in written_sections
+            ]
+        )
+        print(f"write_sections_with_citations: saved report {report_id} version {new_version_id} to MongoDB")
     except Exception as e:
         print(f"write_sections_with_citations: failed to save report to MongoDB: {e}")
 
@@ -632,8 +545,27 @@ async def research_sections(state: dict, config: RunnableConfig) -> dict:
         section_title = section.get("title", "")
         section_subtopics = section.get("subtopics", [])
 
+        # OPTIMIZATION: Extract pre-generated research plan from outline (if exists)
+        pregenerated_plan = section.get("research_plan", {})
+        research_plan = []
+        if pregenerated_plan:
+            primary_query = pregenerated_plan.get("primary_query", "")
+            targeted_searches = pregenerated_plan.get("targeted_searches", [])
+
+            if primary_query:
+                research_plan.append({"query": primary_query, "type": "primary"})
+
+            for ts in targeted_searches:
+                research_plan.append({
+                    "query": ts.get("query", ""),
+                    "type": "targeted",
+                    "priority": ts.get("priority", "medium")
+                })
+
         print(f"\n  === Researching section {idx + 1}/{len(sections)}: {section_title} ===")
         print(f"      Subtopics: {section_subtopics[:3]}")
+        if research_plan:
+            print(f"      Pre-generated plan: {len(research_plan)} searches")
 
         subgraph_state = {
             "subtopic_id": idx,
@@ -646,13 +578,11 @@ async def research_sections(state: dict, config: RunnableConfig) -> dict:
             "source_credibilities": {},
             "source_relevance_scores": {},
             "entities": [],
-            "research_plan": [],
+            "research_plan": research_plan,  # OPTIMIZATION: Pass pre-generated plan
             "completed_searches": 0,
             "max_search_results": agent_config.max_search_results,
             "max_research_depth": agent_config.max_research_depth,
             "search_api": agent_config.search_api,
-            "enable_mcp_fetch": agent_config.enable_mcp_fetch,
-            "max_mcp_fetches": agent_config.max_mcp_fetches
         }
 
         result = await subresearcher_graph.ainvoke(subgraph_state)
@@ -684,37 +614,187 @@ async def research_sections(state: dict, config: RunnableConfig) -> dict:
     }
 
 
-async def research_outline_and_write(state: dict, config: RunnableConfig) -> dict:
-    """
-    Merged node: Generate outline, research sections, and write.
-    Flow: outline → research each section → write sections
-    """
-    print("research_outline_and_write: Starting combined research and writing process")
+async def write_outline(state: dict, config: RunnableConfig) -> dict:
+    topic = state.get("topic", "")
 
-    # 1. Generate Outline (creates sections based on question)
-    print("research_outline_and_write: Step 1 - Generating outline")
-    outline_result = await generate_outline(state)
-    state = {**state, **outline_result}
+    print(f"generate_outline: creating outline for topic='{topic}'")
 
-    # 2. Research Sections (1 subresearcher per outline section)
+    outline_prompt = f"""
+        You are a report outline specialist. Create a structured outline that DIRECTLY ANSWERS the main research question.
+
+        MAIN RESEARCH QUESTION: {topic}
+
+        CRITICAL: First, determine what TYPE of question this is, then organize sections accordingly:
+
+        **TYPE A - ENTITY-FOCUSED** (listing/comparing specific items):
+        Examples: "Best mobile games 2024", "Top K-pop songs", "MMORPG recommendations", "Leading AI companies"
+
+        **CRITICAL FOR TYPE A - USE THEMATIC GROUPING + RESEARCH QUESTIONS:**
+        - DO NOT create one section per entity (this leads to incomplete coverage)
+        - Instead, create 2-4 THEMATIC sections that each cover MULTIPLE entities
+        - Example for "MMORPGs in 2025":
+          ❌ BAD: "WoW", "FFXIV", "GW2" (individual sections = incomplete coverage)
+          ✅ GOOD: "Established MMORPGs with Expansions", "Emerging MMORPGs", "Gameplay Innovation Trends"
+        - Each thematic section should discuss 3-5+ entities with comparisons
+        - This ensures comprehensive coverage and prevents cherry-picking
+
+        **CRITICAL FOR TYPE A - SUBTOPICS MUST BE RESEARCH QUESTIONS, NOT SPECIFIC ENTITIES:**
+        - DO NOT list specific entity names as subtopics (e.g., "World of Warcraft", "Final Fantasy XIV")
+        - Instead, use BROAD RESEARCH QUESTIONS that will allow discovery of ALL relevant entities
+        - Example for "Established MMORPGs with Expansions":
+          ❌ BAD subtopics: ["World of Warcraft: Dragonflight Expansion", "Final Fantasy XIV: Dawntrail Expansion", "Guild Wars 2: The Icebrood Saga"]
+          ✅ GOOD subtopics: ["Which established MMORPGs released major expansions in 2024-2025?", "What are the player retention trends for long-running MMORPGs?", "How do expansion features compare across top MMORPGs?", "What are the subscription and monetization models?"]
+        - Research questions allow the research system to discover ALL relevant entities dynamically
+        - Specific entity names constrain research to only those entities and miss others
+        - Each section should have 3-5 research questions that guide comprehensive discovery
+
+        **TYPE B - THEMATIC/ANALYTICAL** (explaining concepts, comparing philosophies, analyzing impacts):
+        Examples: "Investment philosophies of Buffett vs Munger", "Impact of AI on labor", "HGT in eukaryotes"
+        → Create sections by KEY THEMES/ASPECTS that answer the question
+        → Section titles = Themes/dimensions (e.g., "Risk Management", "Portfolio Construction", "Decision Process")
+        → Synthesize findings across subtopics for each theme
+
+        **TYPE C - MARKET/TECHNICAL ANALYSIS** (sizing markets, evaluating technologies, comparing methods):
+        Examples: "Elderly consumption Japan 2020-2050", "Scaling quantum computing", "SRAM stability methods"
+        → Structure by ANALYTICAL COMPONENTS
+        → Section titles = Analysis dimensions (e.g., "Market Size", "Technology Roadmap", "Implementation")
+
+        **TYPE D - COMPREHENSIVE RESEARCH** (multi-faceted exploration of complex topics):
+        Examples: "AI in K-12 education", "Gut microbiota and cancer", "Bird migration navigation"
+        → Organize by LOGICAL FLOW (background → mechanisms → applications → implications)
+        → Build from foundational concepts to specific findings
+
+        STRUCTURE (adapt to type):
+        1. Executive Summary - Key findings/direct answer
+        2. Main sections (2-5):
+           - TYPE A: One per discovered entity
+           - TYPE B/C/D: One per theme/aspect/component
+        3. Conclusion - Synthesis and implications
+
+        For each section:
+        - Title: Entity name OR theme/aspect
+        - Subtopics: Which research contains relevant data
+        - Key questions: What this section should answer
+
+        Return JSON:
+        {{
+          "sections": [
+            {{
+              "title": "Section Title",
+              "subtopics": ["subtopic1", "subtopic2"],
+              "research_plan": {{
+                "primary_query": "main search query for this section",
+                "targeted_searches": [
+                  {{"query": "specific search 1", "priority": "high"}},
+                  {{"query": "specific search 2", "priority": "medium"}}
+                ]
+              }}
+            }}
+          ]
+        }}
+
+        OPTIMIZATION: For each section, also provide a research_plan:
+        - primary_query: One broad search combining the topic + section title
+        - targeted_searches: 3-5 focused searches for the subtopics (with priority: high/medium/low)
+        - This saves an additional LLM call during research phase
+
+        **CRITICAL QUERY SPECIFICITY RULES (for high-quality research):**
+        When creating research queries, ALWAYS include:
+        1. **Location specificity**: If the topic mentions a country/region, include it in EVERY query
+           - ✅ GOOD: "Japan elderly consumption housing 2024 statistics"
+           - ❌ BAD: "elderly housing consumption patterns"
+        2. **Data type specificity**: Explicitly request quantitative data
+           - ✅ GOOD: "Japan elderly population 2020-2050 projections statistics"
+           - ❌ BAD: "Japan aging population trends"
+        3. **Market size specificity**: For market analysis, request dollar/yen amounts
+           - ✅ GOOD: "Japan elderly clothing market size revenue 2024 yen"
+           - ❌ BAD: "elderly clothing market Japan"
+        4. **Year/timeframe specificity**: Include exact years or ranges
+           - ✅ GOOD: "Japan elderly consumption 2020 2025 2030 projections"
+           - ❌ BAD: "Japan future elderly consumption"
+        5. **Official source targeting**: Include keywords that find authoritative data
+           - ✅ GOOD: "Japan Ministry Internal Affairs elderly expenditure survey 2024"
+           - ✅ GOOD: "OECD Japan elderly spending data statistics"
+           - ❌ BAD: "Japan elderly spending information"
+
+        Examples of GOOD vs BAD research queries:
+        Topic: "Market size analysis for elderly consumption in Japan 2020-2050"
+
+        ❌ BAD queries (too generic, get irrelevant results):
+        - "elderly consumption patterns"
+        - "aging population market opportunities"
+        - "senior consumer behavior"
+
+        ✅ GOOD queries (specific, get targeted data):
+        - "Japan elderly population 2020 2030 2050 projections Ministry statistics"
+        - "Japan elderly housing expenditure market size 2024 yen revenue"
+        - "Japan elderly food consumption spending statistics 2023 2024"
+        - "Japan transportation elderly market size accessible vehicles 2024"
+        - "Japan Ministry Internal Affairs elderly household spending survey 2024"
+        """
+
+    messages = [
+        SystemMessage(
+            content="You are an expert report outline specialist. Create comprehensive, well-structured outlines that ensure complete coverage, logical flow, and clear organization. Focus on creating outlines that will result in high-quality reports with excellent coverage, evidence, structure, and clarity."),
+        HumanMessage(content=outline_prompt)
+    ]
+
+    response = await llm.ainvoke(messages)
+    response_text = response.content if hasattr(response, 'content') else str(response)
+
+    # Parse JSON outline (simplified)
+    try:
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+        if json_match:
+            outline = json.loads(json_match.group())
+        else:
+            # Fallback: create generic outline
+            outline = {
+                "sections": [
+                    {"title": "Executive Summary", "subtopics": []},
+                    {"title": "Main Analysis", "subtopics": []},
+                    {"title": "Conclusion", "subtopics": []}
+                ]
+            }
+    except Exception as e:
+        print(f"generate_outline: error parsing JSON, using fallback: {e}")
+        outline = {
+            "sections": [
+                {"title": "Executive Summary", "subtopics": []},
+                {"title": "Main Analysis", "subtopics": []},
+                {"title": "Conclusion", "subtopics": []}
+            ]
+        }
+
+    print(f"generate_outline: created outline with {len(outline.get('sections', []))} sections")
+
+    for section in outline.get("sections", []):
+        print(f"  Section: '{section.get('title', '')}' -> Subtopics: {section.get('subtopics', [])}")
+
+    return {
+        "messages": [AIMessage(content=outline.get("sections", []))],
+        "report_outline": outline,
+        "report_sections": []
+    }
+
+
+async def research_and_write(state: dict, config: RunnableConfig) -> dict:
+    """
+    Research sections, and write.
+    """
+    print("research_and_write: Starting combined research and writing process")
+
+    # Research Sections (1 subresearcher per outline section)
     print("research_outline_and_write: Step 2 - Researching sections")
     research_result = await research_sections(state, config)
     state = {**state, **research_result}
 
-    # 3. Write Sections
+    # Write Sections
     print("research_outline_and_write: Step 3 - Writing sections")
     write_result = await write_sections_with_citations(state, config)
 
-    # SEQUENTIAL MESSAGES FIX: Only return the final report message for clean LangSmith chat
-    final_message = None
-    if "messages" in write_result and write_result["messages"]:
-        final_message = write_result["messages"][-1]  # Take only the last message (full report)
-
-    print("research_outline_and_write: Completed combined process")
 
     return {
-        **outline_result,
         **research_result,
         **write_result,
-        "messages": [final_message] if final_message else []  # Only ONE message
     }

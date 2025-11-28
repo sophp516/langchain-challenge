@@ -16,7 +16,6 @@ llm = ChatOpenAI(
 )
 
 # Quality LLM for complex tasks (writing, extraction, planning)
-# Better at following complex instructions and avoiding hallucination
 llm_quality = ChatOpenAI(
     model="gpt-4o",
     api_key=openai_api_key,
@@ -31,6 +30,6 @@ if gemini_api_key:
     )
     print("Using Gemini as external evaluator (matches RACE benchmark)")
 else:
-    print("GOOGLE_API_KEY not set - using GPT for evaluation (less unbiased)")
+    print("GOOGLE_API_KEY not set - using GPT for evaluation")
     evaluator_llm = llm
 
