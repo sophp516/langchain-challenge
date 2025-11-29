@@ -38,7 +38,7 @@ def create_agent(use_checkpointer=False):
     # Research Workflow Nodes
     workflow.add_node("generate_plan_and_research", generate_plan_and_research)
     workflow.add_node("write_full_report", write_full_report)
-    # workflow.add_node("evaluate_report", evaluate_report)
+    workflow.add_node("evaluate_report", evaluate_report)
 
     workflow.set_entry_point("check_user_intent")
 
@@ -74,9 +74,8 @@ def create_agent(use_checkpointer=False):
 
     # Research Flow
     workflow.add_edge("generate_plan_and_research", "write_full_report")
-    workflow.add_edge("write_full_report", END)
-    # workflow.add_edge("write_full_report", "evaluate_report")
-    # workflow.add_edge("evaluate_report", END)
+    workflow.add_edge("write_full_report", "evaluate_report")
+    workflow.add_edge("evaluate_report", END)
 
     if use_checkpointer:
         memory = MemorySaver()
