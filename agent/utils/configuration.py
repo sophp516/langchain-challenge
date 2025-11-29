@@ -8,6 +8,27 @@ import os
 class AgentConfig(BaseModel):
     """Configuration for the deep research agent - can be passed from UI"""
 
+    # Model Configuration
+    fast_model: str = Field(
+        default="gpt-4o-mini",
+        description="Fast LLM for simple tasks (intent classification, clarification, outline generation)"
+    )
+
+    quality_model: str = Field(
+        default="gpt-5.1",
+        description="Quality LLM for complex tasks (writing, section generation, planning)"
+    )
+
+    evaluator_model: str = Field(
+        default="gemini-2.0-flash",
+        description="External evaluator LLM for unbiased report evaluation (use different provider than main models)"
+    )
+
+    evaluator_provider: Literal["openai", "google"] = Field(
+        default="google",
+        description="Provider for evaluator model (openai or google)"
+    )
+
     # Search API settings
     # TODO: Find and add web search apis that have full content extraction with search
     search_api: Literal["tavily"] = Field(
