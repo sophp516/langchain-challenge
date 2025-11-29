@@ -1,5 +1,5 @@
 from langchain_core.messages import SystemMessage, HumanMessage
-from utils.model import configurable_model, get_evaluator_model_config
+from utils.model import llm_quality, llm, evaluator_llm
 from utils.configuration import get_config_from_configurable
 from typing import Dict, List, Tuple
 from urllib.parse import urlparse
@@ -179,11 +179,7 @@ async def evaluate_report(state: dict, config: RunnableConfig) -> dict:
         HumanMessage(content=evaluation_prompt)
     ]
 
-    # Get evaluator model config and use configurable_model
-    evaluator_config = get_evaluator_model_config(agent_config)
-    print(f"evaluate_report: using evaluator model: {evaluator_config['model']}")
-
-    response = await configurable_model.with_config(evaluator_config).ainvoke(messages)
+    response = await evaluator_llm.ainvoke(messages)
     response_text = response.content if hasattr(response, 'content') else str(response)
 
     # DEBUG: Log the full response to understand Gemini's format

@@ -1,7 +1,7 @@
 from langgraph.types import RunnableConfig, interrupt
 from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
 from pydantic import create_model
-from utils.model import configurable_model, get_fast_model_config
+from utils.model import llm_quality, llm, evaluator_llm
 from utils.configuration import get_config_from_configurable
 
 
@@ -47,8 +47,7 @@ async def check_user_intent(state: dict, config: RunnableConfig) -> dict:
     )
 
     # Get model config and create structured output model
-    model_config = get_fast_model_config(agent_config)
-    structured_llm = configurable_model.with_config(model_config).with_structured_output(IntentOutput)
+    structured_llm = llm.with_structured_output(IntentOutput)
 
     # Build context string for LLM
     context_info = ""
@@ -164,9 +163,7 @@ async def check_initial_context(state: dict, config: RunnableConfig) -> dict:
         clarifying_question=(str, ...)  # Empty string if sufficient
     )
 
-    # Get model config and create structured output model
-    model_config = get_fast_model_config(agent_config)
-    topic_evaluation_llm = configurable_model.with_config(model_config).with_structured_output(TopicEvaluation)
+    topic_evaluation_llm = llm.with_structured_output(TopicEvaluation)
 
     evaluation_prompt = f"""
     You are a research coordinator. Evaluate if the following is a valid research topic that can be researched.

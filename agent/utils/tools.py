@@ -1,5 +1,5 @@
 """
-Tools for report retrieval and management.
+Tools for report retrieval and re.
 These tools can be called by the agent to fetch reports from the database.
 """
 from langchain_core.tools import tool

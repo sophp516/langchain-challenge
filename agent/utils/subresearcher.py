@@ -2,7 +2,7 @@ from typing import TypedDict
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
 from pydantic import create_model
-from utils.model import llm
+from utils.model import llm_quality, llm
 from utils.configuration import tavily_client
 from utils.nodes.helpers import filter_quality_sources
 import asyncio
@@ -10,14 +10,14 @@ from urllib.parse import urlparse
 
 
 class SubResearcherGraphState(TypedDict):
-    """State for the subresearcher subgraph with iterative deepening"""
+    # State for the subresearcher subgraph with iterative deepening
     subtopic_id: int
     subtopic: str  # The broad query
     main_topic: str
     other_subtopics: list[str]
 
     # Section-specific research guidance
-    section_subtopics: list[str]  # Specific subtopics from outline
+    section_subtopics: list[str]  # Specific subtopics from research plan
 
     # Final outputs
     research_results: dict[str, str]  # All combined results
@@ -199,9 +199,9 @@ async def plan_research_strategy(state: SubResearcherGraphState) -> dict:
     print(f"  Section: {section_title}")
     print(f"  Plan has {len(pre_generated_plan)} searches:")
     for search in pre_generated_plan[:3]:
-        search_type = search.get("type", "unknown")
+        priority = search.get("priority", "unknown")
         query = search.get("query", "")[:60]
-        print(f"    - [{search_type.upper()}] {query}...")
+        print(f"    - [{priority.upper()}] {query}...")
 
     if len(pre_generated_plan) > 3:
         print(f"    ... and {len(pre_generated_plan) - 3} more")
@@ -212,179 +212,133 @@ async def plan_research_strategy(state: SubResearcherGraphState) -> dict:
     }
 
 
-async def initial_broad_search(state: SubResearcherGraphState) -> dict:
+async def execute_unified_research(state: SubResearcherGraphState) -> dict:
     """
-    Step 2: Execute initial broad search using research plan.
-    Uses primary query from research plan, or falls back to subtopic.
+    UNIFIED ITERATIVE RESEARCH: Execute ALL searches from research plan in parallel.
 
-    OPTIMIZATION: Checks shared_research_pool first to avoid redundant searches.
+    This replaces the old two-step approach (initial_broad_search + execute_targeted_searches)
+    with a single unified execution that runs all queries in parallel for maximum efficiency.
+
+    Uses pre-generated research plan from generate_research_plan (outline node).
     """
     research_plan = state.get("research_plan", [])
     search_api = state.get("search_api", "tavily")
     max_results = state.get("max_search_results", 3)
     shared_pool = state.get("shared_research_pool", {})
+    section_title = state.get("subtopic", "")
 
-    # Use primary query from research plan, or fallback to subtopic
-    if research_plan:
-        primary_search = next((p for p in research_plan if p.get("type") == "primary"), None)
-        broad_query = primary_search.get("query") if primary_search else state.get("subtopic", "")
-    else:
-        broad_query = state.get("subtopic", "")
+    if not research_plan:
+        print(f"[UNIFIED RESEARCH] ERROR: No research plan provided for section '{section_title}'")
+        return {
+            "research_results": {},
+            "source_relevance_scores": {},
+            "research_depth": 1
+        }
 
-    print(f"[DEPTH 1: Initial Search] Query: {broad_query[:100]}...")
+    print(f"\n[UNIFIED RESEARCH] Executing {len(research_plan)} searches in parallel for: {section_title}")
 
-    # Check shared pool for cached search results
+    # Build queries for parallel execution from research plan
+    queries_with_meta = []
     cached_searches = shared_pool.get("search_cache", {})
-    if broad_query in cached_searches:
-        print(f"[DEPTH 1: Initial Search] CACHE HIT - Reusing results from shared pool")
-        search_results_list = cached_searches[broad_query]
-    else:
-        # Single search on the broad query
-        try:
-            if search_api == "tavily":
-                loop = asyncio.get_event_loop()
-                search_results = await loop.run_in_executor(
-                    None,
-                    lambda: tavily_client.search(query=broad_query, max_results=max_results, include_subtopics=True)
-                )
-                search_results_list = search_results.get("results", [])[:max_results]
-            else:
-                search_results_list = []
+    cache_hits = []
 
-        except Exception as e:
-            print(f"[DEPTH 1: Initial Search] Initial search failed: {e}")
-            search_results_list = []
+    for idx, search_spec in enumerate(research_plan):
+        query = search_spec.get("query", "")
+        priority = search_spec.get("priority", "medium")
 
-    # Early quality filtering - filter by domain quality BEFORE processing
-    initial_count = len(search_results_list)
-    search_results_list = filter_results_by_domain_quality(search_results_list, min_score=0.5)
-    filtered_count = len(search_results_list)
+        # Check cache
+        if query in cached_searches:
+            cache_hits.append((query, cached_searches[query], {"priority": priority, "index": idx}))
+        else:
+            queries_with_meta.append((query, {"priority": priority, "index": idx}))
 
-    if filtered_count < initial_count:
-        print(f"[DEPTH 1: Initial Search] Early filtering: {initial_count} → {filtered_count} sources (removed {initial_count - filtered_count} low-quality domains)")
+    if cache_hits:
+        print(f"[UNIFIED RESEARCH] Cache hits: {len(cache_hits)} searches (saved API calls)")
 
-    # Store initial results with relevance scores
-    initial_results = {}
+    # Execute uncached searches in parallel
+    search_results = []
+    if queries_with_meta:
+        print(f"[UNIFIED RESEARCH] Executing {len(queries_with_meta)} new searches...")
+        search_results = await parallel_search_with_rate_limit(
+            queries=queries_with_meta,
+            search_api=search_api,
+            max_results=max_results,
+            max_concurrent=5  # Rate limiting
+        )
+
+    # Combine cache hits with new results
+    all_search_results = cache_hits + search_results
+
+    # Process all results with quality filtering
+    all_results = {}
     relevance_scores = {}
-    initial_domain_scores = {}  # Track domain quality scores
-
-    for idx, result in enumerate(search_results_list):
-        source_url = result.get("url", "")
-        source_title = result.get("title", "Untitled")
-        source_content = result.get("content", "")
-        search_score = result.get("score", 0.0)  # Search API relevance score
-
-        if source_content:
-            source_key = f"{source_title} ({source_url})"
-            initial_results[source_key] = source_content
-
-            # Store domain quality for later use
-            initial_domain_scores[source_key] = quick_domain_quality_score(source_url)
-
-            # Use search score if available
-            if search_score > 0:
-                relevance_scores[source_key] = search_score
-            else:
-                # Otherwise use position-based relevance (earlier result the better)
-                relevance_scores[source_key] = 1.0 - (idx * 0.5 / max(len(search_results_list), 1))
-
-    print(f"[Initial Search] Found {len(initial_results)} sources")
-
-    if initial_results:
-        sample_keys = list(initial_results.keys())[:3]
-        for key in sample_keys:
-            content = initial_results[key]
-            preview = content[:150].replace('\n', ' ')
-            print(f"    Sample: {key[:100]}... | {preview}...")
-
-    # Store search results in shared pool cache
-    update_dict = {
-        "research_results": initial_results,
-        "source_relevance_scores": relevance_scores,
-        "research_depth": 1
-    }
-
-    # Only update cache if no cache hit
-    if broad_query not in cached_searches and search_results_list:
-        updated_cache = {**cached_searches, broad_query: search_results_list}
-        updated_pool = {**shared_pool, "search_cache": updated_cache}
-        update_dict["shared_research_pool"] = updated_pool
-        print(f"[Initial Search] Cached search results in shared pool")
-
-    return update_dict
-
-
-async def execute_targeted_searches(state: SubResearcherGraphState) -> dict:
-    """
-    Step 3: Execute targeted searches from research plan with PARALLEL EXECUTION.
-
-    IMPROVEMENT #3: Uses parallel_search_with_rate_limit for faster, rate-limited searches.
-    """
-    research_plan = state.get("research_plan", [])
-    search_api = state.get("search_api", "tavily")
-    max_results = state.get("max_search_results", 3)
-    max_depth = state.get("max_research_depth", 1)
-
-    targeted_searches = [p for p in research_plan if p.get("type") == "targeted"]
-
-    # If max_depth is 1 or no targeted searches, skip
-    if max_depth <= 1 or not targeted_searches:
-        print(f"[Targeted Searches] Skipping (max_depth={max_depth}, targeted={len(targeted_searches)})")
-        return {"entities": []}
-
-    print(f"[Targeted Searches] Executing {len(targeted_searches)} searches in PARALLEL...")
-
-    # Execute all searches in parallel
-    queries_with_meta = [
-        (search_spec.get("query", ""), {"priority": search_spec.get("priority", "medium"), "index": idx})
-        for idx, search_spec in enumerate(targeted_searches)
-    ]
-
-    search_results = await parallel_search_with_rate_limit(
-        queries=queries_with_meta,
-        search_api=search_api,
-        max_results=max_results,
-        max_concurrent=5 # Rate limiting
-    )
-
-    all_targeted_results = {}
-    relevance_scores = state.get("source_relevance_scores", {}).copy()
     total_before_filter = 0
     total_after_filter = 0
+    updated_cache = {**cached_searches}
 
-    for query, results_list, metadata in search_results:
+    for query, results_list, metadata in all_search_results:
         priority = metadata.get("priority", "medium")
-        print(f"  [{priority.upper()}] {query[:80]}... → {len(results_list)} results")
+        query_index = metadata.get("index", 0)
 
         total_before_filter += len(results_list)
-        results_list = filter_results_by_domain_quality(results_list, min_score=0.3)
+
+        # Quality filtering - use uniform threshold
+        min_quality = 0.4
+        results_list = filter_results_by_domain_quality(results_list, min_score=min_quality)
         total_after_filter += len(results_list)
 
+        print(f"  [{priority.upper()}] {query[:60]}... → {len(results_list)} sources")
+
+        # Cache new searches
+        if query not in cached_searches and results_list:
+            updated_cache[query] = results_list
+
+        # Store results
         for result_idx, result in enumerate(results_list):
             source_url = result.get("url", "")
             source_title = result.get("title", "Untitled")
             source_content = result.get("content", "")
+            search_score = result.get("score", 0.0)
 
             if source_content:
                 source_key = f"{source_title} ({source_url})" if source_url else source_title
-                all_targeted_results[source_key] = source_content
+                all_results[source_key] = source_content
 
-                # Higher relevance for high-priority searches
-                base_relevance = 0.8 if priority == "high" else 0.6
-                relevance_scores[source_key] = base_relevance - (result_idx * 0.1)
+                # Relevance scoring based on query position and priority
+                # Earlier queries in plan = more important
+                if priority == "high":
+                    base_relevance = 0.9
+                elif priority == "medium":
+                    base_relevance = 0.7
+                else:
+                    base_relevance = 0.5
 
-    print(f"Targeted Searches] Total: {len(all_targeted_results)} unique sources from parallel searches")
+                # Adjust by position in plan
+                position_penalty = query_index * 0.02  # Small penalty for later queries
+                base_relevance = max(0.3, base_relevance - position_penalty)
 
-    # Merge with existing results
-    combined_results = state.get("research_results", {}).copy()
-    combined_results.update(all_targeted_results)
+                # Use search API score if available, otherwise position-based
+                if search_score > 0:
+                    relevance_scores[source_key] = search_score
+                else:
+                    relevance_scores[source_key] = base_relevance - (result_idx * 0.05)
 
-    return {
-        "research_results": combined_results,
+    print(f"[UNIFIED RESEARCH] Total: {len(all_results)} unique sources")
+    print(f"[UNIFIED RESEARCH] Quality filtering: {total_before_filter} → {total_after_filter} sources")
+
+    # Update shared pool with new cache entries
+    update_dict = {
+        "research_results": all_results,
         "source_relevance_scores": relevance_scores,
-        "research_depth": 2,
-        "entities": []
+        "research_depth": 1
     }
+
+    if len(updated_cache) > len(cached_searches):
+        updated_pool = {**shared_pool, "search_cache": updated_cache}
+        update_dict["shared_research_pool"] = updated_pool
+        print(f"[UNIFIED RESEARCH] Updated cache: {len(updated_cache) - len(cached_searches)} new searches cached")
+
+    return update_dict
 
 
 async def deep_research_entities(state: SubResearcherGraphState) -> dict:
@@ -565,7 +519,8 @@ async def assess_coverage_and_gaps(state: SubResearcherGraphState) -> dict:
         reasoning=(str, ...)
     )
 
-    llm_structured = llm.with_structured_output(CoverageAnalysis)
+    # Use configurable_model with default settings (subresearcher doesn't have access to agent config)
+    llm_structured = llm_quality.with_structured_output(CoverageAnalysis)
 
     analysis_prompt = f"""Analyze research coverage and identify gaps for deeper investigation.
 
@@ -930,41 +885,41 @@ def should_deepen_research(state: SubResearcherGraphState) -> str:
 
 def create_subresearcher_graph():
     """
-    Create the subresearcher graph with DYNAMIC DEEPENING.
+    Create the subresearcher graph with UNIFIED ITERATIVE RESEARCH and DYNAMIC DEEPENING.
 
     Flow:
-    1. plan_research_strategy: Create initial research plan from outline
-    2. initial_broad_search: Execute primary search
-    3. execute_targeted_searches: Execute planned targeted searches
-    4. assess_coverage_and_gaps: **NEW** Analyze coverage, discover entities/gaps
-    5. Routing decision:
-       - If coverage low OR important entities discovered → deep_dive_research (go to step 6)
-       - If coverage good → assess_quality (skip to step 7)
-    6. deep_dive_research: **NEW** Research discovered entities and fill gaps
+    1. plan_research_strategy: Validate pre-generated research plan from outline
+    2. execute_unified_research: Execute ALL searches (primary + targeted) in parallel
+    3. assess_coverage_and_gaps: Analyze coverage, discover entities/gaps
+    4. Routing decision:
+       - If coverage low OR important entities discovered → deep_dive_research
+       - If coverage good → assess_quality
+    5. deep_dive_research: Research discovered entities and fill gaps
        → Loop back to assess_coverage_and_gaps (iterative deepening)
-    7. assess_quality: Filter and score final sources
-    8. fetch_full_content: Fetch full articles for top sources
+    6. assess_quality: Filter and score final sources
 
-    The graph can loop through steps 4-6 multiple times until max_depth is reached
+    The graph can loop through steps 3-5 multiple times until max_depth is reached
     or coverage is satisfactory.
+
+    IMPROVEMENTS:
+    - Unified research execution (no separate broad/targeted steps)
+    - All planned searches run in parallel for maximum efficiency
+    - Uses pre-generated plan from generate_research_plan
+    - Iterative deepening based on coverage assessment
     """
     workflow = StateGraph(SubResearcherGraphState)
 
     # Add nodes
     workflow.add_node("plan_research", plan_research_strategy)
-    workflow.add_node("initial_broad_search", initial_broad_search)
-    workflow.add_node("targeted_searches", execute_targeted_searches)
+    workflow.add_node("unified_research", execute_unified_research)
     workflow.add_node("assess_coverage", assess_coverage_and_gaps)
     workflow.add_node("deep_dive", deep_dive_research)
     workflow.add_node("assess_quality", assess_quality)
 
-    # Initial research flow
+    # Unified research flow
     workflow.set_entry_point("plan_research")
-    workflow.add_edge("plan_research", "initial_broad_search")
-    workflow.add_edge("initial_broad_search", "targeted_searches")
-
-    # After targeted searches, assess coverage
-    workflow.add_edge("targeted_searches", "assess_coverage")
+    workflow.add_edge("plan_research", "unified_research")
+    workflow.add_edge("unified_research", "assess_coverage")
 
     # Either deepen or finish
     workflow.add_conditional_edges(
