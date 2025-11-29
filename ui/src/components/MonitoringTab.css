@@ -76,6 +76,10 @@
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
 }
 
 .thread-item:hover {
@@ -88,6 +92,11 @@
   background: var(--bg-primary);
   border-color: var(--accent-color);
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+.thread-content {
+  flex: 1;
+  min-width: 0;
 }
 
 .thread-id {
@@ -112,6 +121,35 @@
 
 .thread-count {
   color: var(--text-secondary);
+}
+
+.thread-delete-button {
+  flex-shrink: 0;
+  padding: 0.5rem;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.6;
+}
+
+.thread-item:hover .thread-delete-button {
+  opacity: 1;
+}
+
+.thread-delete-button:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+  transform: scale(1.1);
+}
+
+.thread-delete-button:active {
+  transform: scale(0.95);
 }
 
 /* Messages Panel */

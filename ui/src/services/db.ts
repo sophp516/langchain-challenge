@@ -185,3 +185,27 @@ export async function getAllThreads(): Promise<ThreadData[]> {
   }
 }
 
+/**
+ * Delete a thread from MongoDB
+ */
+export async function deleteThread(threadId: string): Promise<void> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/threads/${threadId}`, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      throw new Error(`Failed to delete thread: ${response.status} - ${errorText}`)
+    }
+
+    console.log(`Deleted thread: ${threadId}`)
+  } catch (error) {
+    console.error('Error deleting thread:', error)
+    throw error
+  }
+}
+
