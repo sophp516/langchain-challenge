@@ -2,28 +2,34 @@ from typing import TypedDict
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
 from pydantic import create_model
-from utils.model import llm
-from utils.configuration import tavily_client
+from utils.model import llm_quality
+from utils.configuration import tavily_client, exa_client
 from utils.nodes.helpers import filter_quality_sources
 import asyncio
 from urllib.parse import urlparse
+import re
 
+
+# ============================================================================
+# STATE DEFINITION
+# ============================================================================
 
 class SubResearcherGraphState(TypedDict):
-    """State for the subresearcher subgraph with iterative deepening"""
+    # State for the subresearcher subgraph with iterative deepening
     subtopic_id: int
     subtopic: str  # The broad query
     main_topic: str
     other_subtopics: list[str]
 
     # Section-specific research guidance
-    section_subtopics: list[str]  # Specific subtopics from outline
+    section_subtopics: list[str]  # Specific subtopics from research plan
 
     # Final outputs
     research_results: dict[str, str]  # All combined results
     source_credibilities: dict[str, float]
     source_relevance_scores: dict[str, float]  # Track search API relevance scores
     research_depth: int
+    summarized_findings: str  # Synthesized summary of key findings with source attribution
 
     # Config
     max_search_results: int
@@ -129,16 +135,16 @@ async def parallel_search_with_rate_limit(
     queries: list[tuple[str, dict]],
     search_api: str,
     max_results: int,
-    max_concurrent: int = 3
+    max_concurrent: int = 2
 ) -> list[tuple[str, list[dict]]]:
     """
     Execute multiple search queries in parallel with rate limiting.
 
     Args:
         queries: List of (query_string, metadata) tuples
-        search_api: "tavily" or "serper"
+        search_api: "tavily" (for now)
         max_results: Max results per query
-        max_concurrent: Max concurrent searches (default 3 for rate limits)
+        max_concurrent: Max concurrent searches (default 2 for rate limits)
 
     Returns:
         List of (query_string, results_list) tuples
@@ -146,26 +152,57 @@ async def parallel_search_with_rate_limit(
     semaphore = asyncio.Semaphore(max_concurrent)
 
     async def throttled_search(query: str, metadata: dict) -> tuple[str, list[dict], dict]:
-        """Execute a single search with rate limiting"""
+        """Execute a single search with rate limiting and retry logic"""
         async with semaphore:
-            try:
-                loop = asyncio.get_event_loop()
+            # Add delay before request to space out requests
+            await asyncio.sleep(1.5)  # Minimum 1.5s between requests
+            
+            max_retries = 3
+            retry_delay = 2.0
+            
+            for attempt in range(max_retries):
+                try:
+                    loop = asyncio.get_event_loop()
 
-                if search_api == "tavily":
-                    search_results = await loop.run_in_executor(
-                        None,
-                        lambda: tavily_client.search(query=query, max_results=max_results, include_raw_content=True)
-                    )
-                    results_list = search_results.get("results", [])[:max_results]
+                    if search_api == "tavily": # TODO: Max depth increase -> rate limit issues
+                        search_results = await loop.run_in_executor(
+                            None,
+                            lambda: tavily_client.search(query=query, max_results=max_results, include_raw_content=True)
+                        )
+                        results_list = search_results.get("results", [])[:max_results]
 
-                    # Smaller delay for Tavily (more permissive rate limits)
-                    await asyncio.sleep(0.1)
+                        # Additional delay after successful request
+                        await asyncio.sleep(0.5)
+                    elif search_api == "exa":
+                        search_results = await loop.run_in_executor(
+                            None,
+                            lambda: exa_client.search_and_contents(query, text=True, type = "auto")
+                        )
+                        results_list = search_results.get("results", [])[:max_results]
 
-                return (query, results_list, metadata)
+                        await asyncio.sleep(0.5)
 
-            except Exception as e:
-                print(f"    Search failed for '{query[:60]}...': {e}")
-                return (query, [], metadata)
+
+                    return (query, results_list, metadata)
+
+                except Exception as e:
+                    error_str = str(e).lower()
+                    # Check if it's a rate limit error
+                    if "rate" in error_str or "excessive" in error_str or "blocked" in error_str:
+                        if attempt < max_retries - 1:
+                            wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                            print(f"    Rate limit hit for '{query[:60]}...', retrying in {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})")
+                            await asyncio.sleep(wait_time)
+                            continue
+                        else:
+                            print(f"    Search failed for '{query[:60]}...': {e} (max retries exceeded)")
+                            return (query, [], metadata)
+                    else:
+                        # Non-rate-limit error, don't retry
+                        print(f"    Search failed for '{query[:60]}...': {e}")
+                        return (query, [], metadata)
+            
+            return (query, [], metadata)
 
     # Execute all searches in parallel with rate limiting
     tasks = [throttled_search(query, meta) for query, meta in queries]
@@ -175,331 +212,249 @@ async def parallel_search_with_rate_limit(
 
 
 # ============================================================================
+# SEARCH HELPER FUNCTIONS
+# ============================================================================
+
+async def _search_single_entity(entity: str, main_topic: str, search_api: str, max_results: int) -> list[dict]:
+    """Execute a single entity search with rate limiting and error handling."""
+    query = f"{entity} {main_topic}"
+    await asyncio.sleep(1.5)  # Rate limiting
+
+    try:
+        loop = asyncio.get_event_loop()
+
+        if search_api == "tavily":
+            results = await loop.run_in_executor(
+                None,
+                lambda: tavily_client.search(query=query, max_results=max_results)
+            )
+            await asyncio.sleep(0.5)
+            return results.get("results", [])[:max_results]
+
+        elif search_api == "exa":
+            results = await loop.run_in_executor(
+                None,
+                lambda: exa_client.search_and_contents(query, text=True, type="auto")
+            )
+            await asyncio.sleep(0.5)
+            return results.get("results", [])[:max_results]
+
+    except Exception as e:
+        error_str = str(e).lower()
+        if "rate" in error_str or "excessive" in error_str or "blocked" in error_str:
+            print(f"[Deep research]   - Search rate limited for {entity}, waiting...")
+            await asyncio.sleep(5.0)
+        print(f"[Deep research]   - Search failed for {entity}: {e}")
+        return []
+
+    return []
+
+
+async def _research_single_entity(entity: str, main_topic: str, search_api: str, max_results: int) -> dict[str, str]:
+    """Research a single entity and return results as dict."""
+    print(f"[Deep research]   - {entity}")
+
+    results = await _search_single_entity(entity, main_topic, search_api, max_results)
+
+    # Convert to dict
+    entity_results = {}
+    for result in results:
+        source_url = result.get("url", "")
+        source_title = result.get("title", "Untitled")
+        source_content = result.get("content", "")
+
+        if source_content:
+            source_key = f"{source_title} ({source_url})"
+            entity_results[source_key] = source_content
+
+    print(f"[Deep research]   - {entity}: found {len(entity_results)} sources")
+    return entity_results
+
+
+def _convert_results_to_dict(results: list[dict]) -> dict[str, str]:
+    """Convert search results list to dict with source_key -> content mapping."""
+    results_dict = {}
+    for result in results:
+        source_url = result.get("url", "")
+        source_title = result.get("title", "Untitled")
+        source_content = result.get("content", "")
+
+        if source_content:
+            source_key = f"{source_title} ({source_url})" if source_url else source_title
+            results_dict[source_key] = source_content
+
+    return results_dict
+
+
+
+# ============================================================================
 # ITERATIVE DEEPENING NODES
 # ============================================================================
 
-async def plan_research_strategy(state: SubResearcherGraphState) -> dict:
+async def execute_research(state: SubResearcherGraphState) -> dict:
     """
-    OPTIMIZATION: Research plans are now pre-generated during outline creation.
-    This node simply validates and returns the pre-generated plan.
-
-    This saves 1 LLM call per section (typically 3-5 calls per report).
-    """
-    pre_generated_plan = state.get("research_plan", [])
-    section_title = state.get("subtopic", "")
-
-    # All research plans should be pre-generated by write_outline()
-    if not pre_generated_plan or len(pre_generated_plan) == 0:
-        raise ValueError(
-            f"No pre-generated research plan found for section '{section_title}'. "
-            "Outline generation should create research plans for all sections."
-        )
-
-    print(f"[RESEARCH PLANNING] Using pre-generated plan from outline (saved 1 LLM call)")
-    print(f"  Section: {section_title}")
-    print(f"  Plan has {len(pre_generated_plan)} searches:")
-    for search in pre_generated_plan[:3]:
-        search_type = search.get("type", "unknown")
-        query = search.get("query", "")[:60]
-        print(f"    - [{search_type.upper()}] {query}...")
-
-    if len(pre_generated_plan) > 3:
-        print(f"    ... and {len(pre_generated_plan) - 3} more")
-
-    return {
-        "research_plan": pre_generated_plan,
-        "completed_searches": 0
-    }
-
-
-async def initial_broad_search(state: SubResearcherGraphState) -> dict:
-    """
-    Step 2: Execute initial broad search using research plan.
-    Uses primary query from research plan, or falls back to subtopic.
-
-    OPTIMIZATION: Checks shared_research_pool first to avoid redundant searches.
+    Execute research using pre-generated plan from outline creation.
+    The research plan is pre-generated during outline creation, saving 1 LLM call per section.
     """
     research_plan = state.get("research_plan", [])
     search_api = state.get("search_api", "tavily")
     max_results = state.get("max_search_results", 3)
     shared_pool = state.get("shared_research_pool", {})
+    section_title = state.get("subtopic", "")
 
-    # Use primary query from research plan, or fallback to subtopic
-    if research_plan:
-        primary_search = next((p for p in research_plan if p.get("type") == "primary"), None)
-        broad_query = primary_search.get("query") if primary_search else state.get("subtopic", "")
-    else:
-        broad_query = state.get("subtopic", "")
+    if not research_plan:
+        print(f"[RESEARCH] ERROR: No research plan provided for section '{section_title}'")
+        return {
+            "research_results": {},
+            "source_relevance_scores": {},
+            "research_depth": 1
+        }
 
-    print(f"[DEPTH 1: Initial Search] Query: {broad_query[:100]}...")
+    print(f"\n[RESEARCH] Executing {len(research_plan)} searches in parallel for: {section_title}")
 
-    # Check shared pool for cached search results
+    queries_with_meta = []
     cached_searches = shared_pool.get("search_cache", {})
-    if broad_query in cached_searches:
-        print(f"[DEPTH 1: Initial Search] CACHE HIT - Reusing results from shared pool")
-        search_results_list = cached_searches[broad_query]
-    else:
-        # Single search on the broad query
-        try:
-            if search_api == "tavily":
-                loop = asyncio.get_event_loop()
-                search_results = await loop.run_in_executor(
-                    None,
-                    lambda: tavily_client.search(query=broad_query, max_results=max_results, include_subtopics=True)
-                )
-                search_results_list = search_results.get("results", [])[:max_results]
-            else:
-                search_results_list = []
+    cache_hits = [] # Cache for entity-based search
 
-        except Exception as e:
-            print(f"[DEPTH 1: Initial Search] Initial search failed: {e}")
-            search_results_list = []
+    for idx, search_spec in enumerate(research_plan):
+        query = search_spec.get("query", "")
+        priority = search_spec.get("priority", "medium")
 
-    # Early quality filtering - filter by domain quality BEFORE processing
-    initial_count = len(search_results_list)
-    search_results_list = filter_results_by_domain_quality(search_results_list, min_score=0.5)
-    filtered_count = len(search_results_list)
+        # Check cache
+        if query in cached_searches:
+            cache_hits.append((query, cached_searches[query], {"priority": priority, "index": idx}))
+        else:
+            queries_with_meta.append((query, {"priority": priority, "index": idx}))
 
-    if filtered_count < initial_count:
-        print(f"[DEPTH 1: Initial Search] Early filtering: {initial_count} → {filtered_count} sources (removed {initial_count - filtered_count} low-quality domains)")
+    if cache_hits:
+        print(f"[RESEARCH] Cache hits: {len(cache_hits)} searches (saved API calls)")
 
-    # Store initial results with relevance scores
-    initial_results = {}
+    # Execute uncached searches in parallel
+    search_results = []
+    if queries_with_meta:
+        print(f"[RESEARCH] Executing {len(queries_with_meta)} new searches...")
+        search_results = await parallel_search_with_rate_limit(
+            queries=queries_with_meta,
+            search_api=search_api,
+            max_results=max_results,
+            max_concurrent=2  # Rate limiting - reduced to avoid API limits
+        )
+
+    # Combine cache hits with new results
+    all_search_results = cache_hits + search_results
+
+    # Process all results with quality filtering
+    all_results = {}
     relevance_scores = {}
-    initial_domain_scores = {}  # Track domain quality scores
-
-    for idx, result in enumerate(search_results_list):
-        source_url = result.get("url", "")
-        source_title = result.get("title", "Untitled")
-        source_content = result.get("content", "")
-        search_score = result.get("score", 0.0)  # Search API relevance score
-
-        if source_content:
-            source_key = f"{source_title} ({source_url})"
-            initial_results[source_key] = source_content
-
-            # Store domain quality for later use
-            initial_domain_scores[source_key] = quick_domain_quality_score(source_url)
-
-            # Use search score if available
-            if search_score > 0:
-                relevance_scores[source_key] = search_score
-            else:
-                # Otherwise use position-based relevance (earlier result the better)
-                relevance_scores[source_key] = 1.0 - (idx * 0.5 / max(len(search_results_list), 1))
-
-    print(f"[Initial Search] Found {len(initial_results)} sources")
-
-    if initial_results:
-        sample_keys = list(initial_results.keys())[:3]
-        for key in sample_keys:
-            content = initial_results[key]
-            preview = content[:150].replace('\n', ' ')
-            print(f"    Sample: {key[:100]}... | {preview}...")
-
-    # Store search results in shared pool cache
-    update_dict = {
-        "research_results": initial_results,
-        "source_relevance_scores": relevance_scores,
-        "research_depth": 1
-    }
-
-    # Only update cache if no cache hit
-    if broad_query not in cached_searches and search_results_list:
-        updated_cache = {**cached_searches, broad_query: search_results_list}
-        updated_pool = {**shared_pool, "search_cache": updated_cache}
-        update_dict["shared_research_pool"] = updated_pool
-        print(f"[Initial Search] Cached search results in shared pool")
-
-    return update_dict
-
-
-async def execute_targeted_searches(state: SubResearcherGraphState) -> dict:
-    """
-    Step 3: Execute targeted searches from research plan with PARALLEL EXECUTION.
-
-    IMPROVEMENT #3: Uses parallel_search_with_rate_limit for faster, rate-limited searches.
-    """
-    research_plan = state.get("research_plan", [])
-    search_api = state.get("search_api", "tavily")
-    max_results = state.get("max_search_results", 3)
-    max_depth = state.get("max_research_depth", 1)
-
-    targeted_searches = [p for p in research_plan if p.get("type") == "targeted"]
-
-    # If max_depth is 1 or no targeted searches, skip
-    if max_depth <= 1 or not targeted_searches:
-        print(f"[Targeted Searches] Skipping (max_depth={max_depth}, targeted={len(targeted_searches)})")
-        return {"entities": []}
-
-    print(f"[Targeted Searches] Executing {len(targeted_searches)} searches in PARALLEL...")
-
-    # Execute all searches in parallel
-    queries_with_meta = [
-        (search_spec.get("query", ""), {"priority": search_spec.get("priority", "medium"), "index": idx})
-        for idx, search_spec in enumerate(targeted_searches)
-    ]
-
-    search_results = await parallel_search_with_rate_limit(
-        queries=queries_with_meta,
-        search_api=search_api,
-        max_results=max_results,
-        max_concurrent=5 # Rate limiting
-    )
-
-    all_targeted_results = {}
-    relevance_scores = state.get("source_relevance_scores", {}).copy()
     total_before_filter = 0
     total_after_filter = 0
+    updated_cache = {**cached_searches}
 
-    for query, results_list, metadata in search_results:
+    for query, results_list, metadata in all_search_results:
         priority = metadata.get("priority", "medium")
-        print(f"  [{priority.upper()}] {query[:80]}... → {len(results_list)} results")
+        query_index = metadata.get("index", 0)
 
         total_before_filter += len(results_list)
-        results_list = filter_results_by_domain_quality(results_list, min_score=0.3)
+
+        # Quality filtering (use uniform threshold)
+        min_quality = 0.4
+        results_list = filter_results_by_domain_quality(results_list, min_score=min_quality)
         total_after_filter += len(results_list)
 
+        print(f"  [{priority.upper()}] {query[:60]}... → {len(results_list)} sources")
+
+        # Cache new searches
+        if query not in cached_searches and results_list:
+            updated_cache[query] = results_list
+
+        # Store results
         for result_idx, result in enumerate(results_list):
             source_url = result.get("url", "")
             source_title = result.get("title", "Untitled")
             source_content = result.get("content", "")
+            search_score = result.get("score", 0.0)
 
             if source_content:
                 source_key = f"{source_title} ({source_url})" if source_url else source_title
-                all_targeted_results[source_key] = source_content
+                all_results[source_key] = source_content
 
-                # Higher relevance for high-priority searches
-                base_relevance = 0.8 if priority == "high" else 0.6
-                relevance_scores[source_key] = base_relevance - (result_idx * 0.1)
+                # Relevance scoring based on query position and priority
+                # Earlier queries in plan = more important
+                if priority == "high":
+                    base_relevance = 0.9
+                elif priority == "medium":
+                    base_relevance = 0.7
+                else:
+                    base_relevance = 0.5
 
-    print(f"Targeted Searches] Total: {len(all_targeted_results)} unique sources from parallel searches")
+                # Adjust by position in plan
+                position_penalty = query_index * 0.02  # Small penalty for later queries
+                base_relevance = max(0.3, base_relevance - position_penalty)
 
-    # Merge with existing results
-    combined_results = state.get("research_results", {}).copy()
-    combined_results.update(all_targeted_results)
+                # Use search API score if available, otherwise position-based
+                if search_score > 0:
+                    relevance_scores[source_key] = search_score
+                else:
+                    relevance_scores[source_key] = base_relevance - (result_idx * 0.05)
 
-    return {
-        "research_results": combined_results,
+    print(f"[RESEARCH] Total: {len(all_results)} unique sources")
+    print(f"[RESEARCH] Quality filtering: {total_before_filter} → {total_after_filter} sources")
+
+    # Update shared pool with new cache entries
+    update_dict = {
+        "research_results": all_results,
         "source_relevance_scores": relevance_scores,
-        "research_depth": 2,
-        "entities": []
+        "research_depth": 1
     }
+
+    if len(updated_cache) > len(cached_searches):
+        updated_pool = {**shared_pool, "search_cache": updated_cache}
+        update_dict["shared_research_pool"] = updated_pool
+        print(f"[RESEARCH] Updated cache: {len(updated_cache) - len(cached_searches)} new searches cached")
+
+    return update_dict
 
 
 async def deep_research_entities(state: SubResearcherGraphState) -> dict:
     """
-    Step 3: Deep research on each extracted entity with PARALLEL SEARCH STRATEGIES.
-    For each entity, searches academic + news + social sources simultaneously.
+    Deep research on each extracted entity using unified search.
     Combines with initial results.
     """
     entities = state.get("entities", [])
     main_topic = state.get("main_topic", "")
     search_api = state.get("search_api", "tavily")
-    max_results = state.get("max_search_results", 3)
+    max_results = state.get("max_search_results", 5)
     initial_results = state.get("research_results", {})
 
     if not entities:
         print(f"[Deep research] No entities to research, keeping initial results")
         return {}
 
-    print(f"[Deep research] Deep research on {len(entities)} entities with parallel search strategies...")
+    print(f"[Deep research] Deep research on {len(entities)} entities...")
 
-    async def search_academic(entity: str):
-        """Search academic/research sources for entity"""
-        # Trust search API's ranking - no site restrictions
-        academic_query = f"{entity} {main_topic} academic research papers"
-        try:
-            if search_api == "tavily":
-                loop = asyncio.get_event_loop()
-                results = await loop.run_in_executor(
-                    None,
-                    lambda: tavily_client.search(query=academic_query, max_results=max_results)
-                )
-                return results.get("results", [])[:max_results]
-        except Exception as e:
-            print(f"[Deep research]   - Academic search failed for {entity}: {e}")
-            return []
 
-    async def search_news(entity: str):
-        """Search news sources for entity"""
-        # Trust search API's ranking - no site restrictions
-        news_query = f"{entity} {main_topic} latest news updates"
-        try:
-            if search_api == "tavily":
-                loop = asyncio.get_event_loop()
-                results = await loop.run_in_executor(
-                    None,
-                    lambda: tavily_client.search(query=news_query, max_results=max_results)
-                )
-                return results.get("results", [])[:max_results]
-        except Exception as e:
-            print(f"[Deep research]   - News search failed for {entity}: {e}")
-            return []
+    # Limit to 2 entities at a time to avoid rate limits
+    entity_semaphore = asyncio.Semaphore(2)
 
-    async def search_social_web(entity: str):
-        """Search general web and social sources for entity"""
-        general_query = f"{entity} {main_topic}"
-        try:
-            if search_api == "tavily":
-                loop = asyncio.get_event_loop()
-                results = await loop.run_in_executor(
-                    None,
-                    lambda: tavily_client.search(query=general_query, max_results=max_results)
-                )
-                return results.get("results", [])[:max_results]
-        except Exception as e:
-            print(f"[Deep research]   - Social/web search failed for {entity}: {e}")
-            return []
+    async def throttled_research(entity: str):
+        async with entity_semaphore:
+            return await _research_single_entity(entity, main_topic, search_api, max_results)
 
-    async def research_entity_parallel(entity: str):
-        """Research a single entity with parallel search strategies"""
-        print(f"[Deep research]   - {entity}: parallel searches (academic + news + social)")
-
-        # Run all 3 searches in parallel
-        academic_results, news_results, social_results = await asyncio.gather(
-            search_academic(entity),
-            search_news(entity),
-            search_social_web(entity)
-        )
-
-        # Combine all results
-        all_results = academic_results + news_results + social_results
-
-        # Convert to dict
-        entity_results = {}
-        for result in all_results:
-            source_url = result.get("url", "")
-            source_title = result.get("title", "Untitled")
-            source_content = result.get("content", "")
-
-            if source_content:
-                source_key = f"{source_title} ({source_url})"
-                entity_results[source_key] = source_content
-
-        print(f"[Deep research]   - {entity}: found {len(entity_results)} sources (academic={len(academic_results)}, news={len(news_results)}, social={len(social_results)})")
-        return entity_results
-
-    # Research all entities with rate limiting
-    all_entity_results = []
-    if search_api == "tavily":
-        tasks = [research_entity_parallel(entity) for entity in entities]
-        all_entity_results = await asyncio.gather(*tasks)
+    tasks = [throttled_research(entity) for entity in entities]
+    all_entity_results = await asyncio.gather(*tasks)
 
     # Combine all results (initial + entity research) with relevance tracking
     combined_results = {**initial_results}
     combined_relevance = state.get("source_relevance_scores", {}).copy()
 
-    entity_idx = 0
-    for entity_results in all_entity_results:
+    for entity_idx, entity_results in enumerate(all_entity_results):
         for source_key, content in entity_results.items():
             combined_results[source_key] = content
             # Deep research sources: relevance based on entity order (earlier entities = more important)
             if source_key not in combined_relevance:
-                combined_relevance[source_key] = 0.7 - (entity_idx * 0.1)  # Start at 0.7, decrease by entity
-        entity_idx += 1
+                combined_relevance[source_key] = 0.7 - (entity_idx * 0.1)
 
-    print(f"[Deep research] Combined total: {len(combined_results)} sources from parallel searches")
+    print(f"[Deep research] Combined total: {len(combined_results)} sources")
 
     # Print sample of deep research findings
     if all_entity_results:
@@ -561,11 +516,12 @@ async def assess_coverage_and_gaps(state: SubResearcherGraphState) -> dict:
         coverage_score=(float, ...),  # 0.0-1.0
         discovered_entities=(list[str], ...),  # Important entities/topics mentioned
         knowledge_gaps=(list[str], ...),  # Questions raised but not answered
-        needs_deeper_research=(bool, ...),  # Should we go deeper?
+        needs_deeper_research=(bool, ...),
         reasoning=(str, ...)
     )
 
-    llm_structured = llm.with_structured_output(CoverageAnalysis)
+    # Use configurable_model with default settings (subresearcher doesn't have access to agent config)
+    llm_structured = llm_quality.with_structured_output(CoverageAnalysis)
 
     analysis_prompt = f"""Analyze research coverage and identify gaps for deeper investigation.
 
@@ -705,7 +661,7 @@ async def deep_dive_research(state: SubResearcherGraphState) -> dict:
     if reused_entities:
         print(f"[DEEP DIVE - SHARED POOL] Reusing research for {len(reused_entities)} entities: {', '.join(reused_entities[:3])}")
 
-    # DEDUPLICATION #2: Check if gaps are similar to already executed searches
+    # Check if gaps are similar to already executed searches
     existing_queries = set()
     for plan_item in research_plan:
         query = plan_item.get("query", "").lower()
@@ -757,45 +713,21 @@ async def deep_dive_research(state: SubResearcherGraphState) -> dict:
     # Build queries for parallel execution
     queries_with_meta = []
 
-    # Add entity-specific queries - make them more specific and actionable
     for entity in discovered_entities:
-        # Filter out low-value entities:
-        # - Skip very long names (likely not useful)
-        # - Skip organization/brand names (unless they're key concepts)
-        # - Skip generic terms
-        entity_lower = entity.lower()
-        skip_indicators = [
-            len(entity.split()) > 4,  # Too long
-            any(word in entity_lower for word in ["inc", "llc", "company", "organization", "association"]),
-            entity_lower in ["usa weightlifting", "barbell medicine", "westside barbell", "elitefts"]  # Common orgs
-        ]
-        
-        if any(skip_indicators):
-            continue
-            
         # Create more specific query that focuses on the comparison aspect
         query = f"{entity} {main_topic}"
         queries_with_meta.append((query, {"type": "entity", "subject": entity, "priority": "high"}))
 
     # Add gap-filling queries - ensure they're search-friendly
     for gap in knowledge_gaps:
-        # If gap is already a search query (no question mark, action-oriented), use it directly
-        # Otherwise, convert question to search query
-        if "?" in gap:
-            # Convert question to search query: remove question words, make it action-oriented
-            query = gap.replace("What", "").replace("How", "").replace("Are there", "").replace("?", "").strip()
-            query = f"{query} {main_topic}" if main_topic not in query else query
-        else:
-            query = gap if len(gap) > 15 else f"{gap} {main_topic}"
+        query = f"{gap} {main_topic}"
         queries_with_meta.append((query, {"type": "gap", "subject": gap, "priority": "medium"}))
 
-    # Execute all deep dive searches in parallel
-    max_concurrent = 3 if search_api == "serper" else 5
     search_results = await parallel_search_with_rate_limit(
         queries=queries_with_meta,
         search_api=search_api,
         max_results=max_results,
-        max_concurrent=max_concurrent
+        max_concurrent=2  # Rate limiting - reduced to avoid API limits
     )
 
     # Process results with early quality filtering
@@ -906,6 +838,186 @@ async def assess_quality(state: SubResearcherGraphState) -> dict:
     }
 
 
+async def summarize_findings(state: SubResearcherGraphState) -> dict:
+    """
+    NEW FINAL NODE: Synthesize research findings into a COMPREHENSIVE, organized report.
+
+    CRITICAL REQUIREMENTS:
+    1. Include ALL information from ALL sources (nothing should be lost)
+    2. Organize information thematically for better readability
+    3. Preserve ALL sources with inline citations
+    4. Return a complete report that can be merged with other subtopic reports
+    5. The output should be LONGER and more comprehensive, not shorter
+
+    Benefits:
+    - Better organization for the writer LLM
+    - All key information is extracted and cited
+    - ALL sources are preserved with proper attribution
+    - Ready to be merged into the final report
+    """
+    research_results = state.get("research_results", {})
+    credibilities = state.get("source_credibilities", {})
+    subtopic = state.get("subtopic", "Unknown Subtopic")
+    main_topic = state.get("main_topic", "")
+
+    if not research_results:
+        print(f"[SUMMARIZE] No results to summarize for '{subtopic}'")
+        return {
+            "summarized_findings": f"No research findings available for {subtopic}."
+        }
+
+    print(f"[SUMMARIZE] Creating comprehensive findings report for '{subtopic}' from {len(research_results)} sources...")
+
+    # Sort sources by credibility
+    sorted_sources = sorted(
+        research_results.items(),
+        key=lambda x: credibilities.get(x[0], 0.5),
+        reverse=True
+    )
+
+    # Build source list using source keys (not numbers yet)
+    # Create a mapping from short IDs to full source keys for easier citation
+    sources_text = ""
+    source_key_to_id = {}  # Maps full source_key to short ID like "src1", "src2"
+    id_to_source_key = {}  # Reverse mapping
+
+    for idx, (source_key, content) in enumerate(sorted_sources, start=1):
+        credibility = credibilities.get(source_key, 0.5)
+        short_id = f"src{idx}"
+        source_key_to_id[source_key] = short_id
+        id_to_source_key[short_id] = source_key
+
+        # Include full content (or substantial portion)
+        sources_text += f"\n[{short_id}] {source_key} (credibility: {credibility:.2f})\n{content}\n"
+
+    # Create comprehensive summarization prompt
+    summarization_prompt = f"""You are a research synthesis specialist. Create a COMPREHENSIVE, organized report from ALL research findings.
+
+MAIN TOPIC: {main_topic}
+SUBTOPIC: {subtopic}
+
+RESEARCH SOURCES - ALL {len(sorted_sources)} SOURCES (cite using [src1], [src2], etc.):
+{sources_text}
+
+CRITICAL REQUIREMENTS:
+
+1. **COMPREHENSIVE COVERAGE - USE ALL SOURCES**:
+   - You MUST incorporate information from ALL {len(sorted_sources)} sources
+   - Do NOT summarize or condense - EXPAND and organize
+   - Include ALL specific data, statistics, examples, and details from every source
+   - Repeat key information verbatim from sources when important
+   - This report should be LONGER than the raw sources, not shorter
+   
+2. **CONTENT RICHNESS**:
+   - Extract and include ALL quantitative data: numbers, percentages, dates, projections
+   - Include ALL named entities: organizations, people, specific programs, studies
+   - Include ALL specific examples and case studies mentioned
+   - Include ALL context: time periods, geographical scope, methodologies
+
+3. **ORGANIZATION**:
+   - Organize findings into 4-8 clear thematic sections
+   - Use descriptive headers (## format)
+   - Within each section, include ALL relevant information from sources
+   - Use bullet points or paragraphs as appropriate for readability
+
+4. **CITATION DISCIPLINE**:
+   - EVERY fact, statistic, claim, or piece of information MUST have a citation using the source IDs
+   - Use inline citations immediately after each fact: "X happened [src3]"
+   - Multiple sources for the same fact: "Y increased 15% [src2][src7][src12]"
+   - Every source ID from [src1] to [src{len(sorted_sources)}] should appear at least once
+   - If a source doesn't fit naturally, create an "Additional Findings" section
+
+5. **NO SOURCES SECTION YET**:
+   - Do NOT include a "## Sources" section in your output
+   - I will add the sources section separately with proper numbering
+   - Just use the [srcX] citations in your text
+
+6. **LENGTH EXPECTATION**:
+   - Target length: 800-2000 words (or more if needed to cover all sources)
+   - Each major section: 200-400 words minimum
+   - Be thorough, not brief
+
+REMEMBER: A later LLM will merge this with other subtopic reports, so having ALL sources and ALL information is CRITICAL. Don't lose anything!
+
+Return the complete organized report with inline citations using [srcX] format.
+"""
+
+    try:
+        messages = [
+            SystemMessage(content="You are a research synthesis specialist. Create comprehensive, well-organized reports that preserve ALL information from ALL sources with proper citations."),
+            HumanMessage(content=summarization_prompt)
+        ]
+
+        response = await llm_quality.ainvoke(messages)
+        summarized_findings = response.content
+
+        print(f"[SUMMARIZE] Generated comprehensive report for '{subtopic}' ({len(summarized_findings)} chars)")
+
+        # Remove consecutive duplicate citations like [src7][src7]
+        cleaned_findings = summarized_findings
+        cleaned_findings = re.sub(r'\[(src\d+)\](\[\1\])+', r'[\1]', cleaned_findings)
+        summarized_findings = cleaned_findings
+
+        # Extract which source IDs were actually cited
+        # Use the cleaned text to avoid counting duplicates
+        citation_matches = re.findall(r'\[src(\d+)\]', summarized_findings)
+        cited_src_ids = set(f"src{c}" for c in citation_matches if c.isdigit())
+
+        print(f"[SUMMARIZE] Found {len(cited_src_ids)} cited sources out of {len(sorted_sources)} available")
+
+        # Renumber citations sequentially and build sources list
+        # Map old src IDs to new sequential numbers
+        src_id_to_number = {}
+        number_to_source_key = {}
+        current_number = 1
+
+        # Assign numbers to cited sources in order of appearance
+        for src_id in sorted(cited_src_ids, key=lambda x: int(x.replace('src', ''))):
+            src_id_to_number[src_id] = current_number
+            source_key = id_to_source_key.get(src_id, "Unknown Source")
+            number_to_source_key[current_number] = source_key
+            current_number += 1
+
+        # Replace all [srcX] with [numbered] citations
+        final_report = summarized_findings
+        # Sort by src number descending to avoid replacing src1 before src10
+        for src_id in sorted(cited_src_ids, key=lambda x: int(x.replace('src', '')), reverse=True):
+            new_number = src_id_to_number[src_id]
+            final_report = re.sub(rf'\[{src_id}\]', f'[{new_number}]', final_report)
+
+        # Add Sources section with sequential numbering (ONLY cited sources)
+        final_report += "\n\n## Sources\n\n"
+        for number in sorted(number_to_source_key.keys()):
+            source_key = number_to_source_key[number]
+            final_report += f"[{number}] {source_key}\n"
+
+        print(f"[SUMMARIZE] ✓ Renumbered {len(cited_src_ids)} sources sequentially (1-{len(cited_src_ids)})")
+        print(f"[SUMMARIZE] ✓ Removed duplicate citations, only including {len(number_to_source_key)} actually cited sources")
+        print(f"[SUMMARIZE] {subtopic}: {final_report}")
+
+        return {
+            "summarized_findings": final_report
+        }
+
+    except Exception as e:
+        print(f"[SUMMARIZE] Summarization failed: {e}")
+        # Fallback: return all sources in a simple format
+        fallback_summary = f"## Research Findings for {subtopic}\n\n"
+        fallback_summary += f"Comprehensive findings from {len(research_results)} sources:\n\n"
+
+        for idx, (source_key, content) in enumerate(sorted_sources, start=1):
+            fallback_summary += f"### Source [{idx}]: {source_key[:150]}\n\n"
+            fallback_summary += f"{content}\n\n"
+
+        fallback_summary += "## Sources\n\n"
+        for idx, (source_key, _) in enumerate(sorted_sources, start=1):
+            fallback_summary += f"[{idx}] {source_key}\n"
+
+        return {
+            "summarized_findings": fallback_summary
+        }
+
+
 # ============================================================================
 # GRAPH CREATION
 # ============================================================================
@@ -930,41 +1042,40 @@ def should_deepen_research(state: SubResearcherGraphState) -> str:
 
 def create_subresearcher_graph():
     """
-    Create the subresearcher graph with DYNAMIC DEEPENING.
+    Create the subresearcher graph with UNIFIED ITERATIVE RESEARCH and DYNAMIC DEEPENING.
 
     Flow:
-    1. plan_research_strategy: Create initial research plan from outline
-    2. initial_broad_search: Execute primary search
-    3. execute_targeted_searches: Execute planned targeted searches
-    4. assess_coverage_and_gaps: **NEW** Analyze coverage, discover entities/gaps
-    5. Routing decision:
-       - If coverage low OR important entities discovered → deep_dive_research (go to step 6)
-       - If coverage good → assess_quality (skip to step 7)
-    6. deep_dive_research: **NEW** Research discovered entities and fill gaps
+    1. execute_research: Execute ALL searches from pre-generated plan in parallel
+    2. assess_coverage_and_gaps: Analyze coverage, discover entities/gaps
+    3. Routing decision:
+       - If coverage low OR important entities discovered → deep_dive_research
+       - If coverage good → assess_quality
+    4. deep_dive_research: Research discovered entities and fill gaps
        → Loop back to assess_coverage_and_gaps (iterative deepening)
-    7. assess_quality: Filter and score final sources
-    8. fetch_full_content: Fetch full articles for top sources
+    5. assess_quality: Filter and score final sources
+    6. summarize_findings: Create comprehensive organized report with ALL sources
 
-    The graph can loop through steps 4-6 multiple times until max_depth is reached
+    The graph can loop through steps 2-4 multiple times until max_depth is reached
     or coverage is satisfactory.
+
+    IMPROVEMENTS:
+    - Research plan pre-generated during outline creation (saved 1 LLM call per section)
+    - All planned searches run in parallel for maximum efficiency
+    - Iterative deepening based on coverage assessment
+    - Final summarization node organizes findings for writer LLM
     """
     workflow = StateGraph(SubResearcherGraphState)
 
     # Add nodes
-    workflow.add_node("plan_research", plan_research_strategy)
-    workflow.add_node("initial_broad_search", initial_broad_search)
-    workflow.add_node("targeted_searches", execute_targeted_searches)
+    workflow.add_node("research", execute_research)
     workflow.add_node("assess_coverage", assess_coverage_and_gaps)
     workflow.add_node("deep_dive", deep_dive_research)
     workflow.add_node("assess_quality", assess_quality)
+    workflow.add_node("summarize", summarize_findings)
 
-    # Initial research flow
-    workflow.set_entry_point("plan_research")
-    workflow.add_edge("plan_research", "initial_broad_search")
-    workflow.add_edge("initial_broad_search", "targeted_searches")
-
-    # After targeted searches, assess coverage
-    workflow.add_edge("targeted_searches", "assess_coverage")
+    # Unified research flow - start directly with execution
+    workflow.set_entry_point("research")
+    workflow.add_edge("research", "assess_coverage")
 
     # Either deepen or finish
     workflow.add_conditional_edges(
@@ -978,7 +1089,10 @@ def create_subresearcher_graph():
 
     # After deep dive, re-assess coverage (may trigger another round)
     workflow.add_edge("deep_dive", "assess_coverage")
-    workflow.add_edge("assess_quality", END)
+
+    # After quality assessment, summarize findings
+    workflow.add_edge("assess_quality", "summarize")
+    workflow.add_edge("summarize", END)
 
     return workflow.compile()
 

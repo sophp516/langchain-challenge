@@ -37,7 +37,7 @@ async def save_report(
         version_id: int,
         full_report: str,
         report_title: str = None,
-        search_results: dict = None,
+        search_results: str = None,
         report_sections: list = None
 ):
     """

@@ -32,4 +32,3 @@ if gemini_api_key:
 else:
     print("GOOGLE_API_KEY not set - using GPT for evaluation")
     evaluator_llm = llm
-

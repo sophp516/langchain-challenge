@@ -1,12 +1,14 @@
+langchain
 langchain-openai
 langchain-core
-langchain_google_genai
 langchain-community
+langchain-google-genai
+langgraph-cli[inmem]
 langgraph
 pydantic
 tavily-python
+perplexityai
 grandalf
-langgraph-cli[inmem]
 pymongo
 pymongo[srv]
 firecrawl-py

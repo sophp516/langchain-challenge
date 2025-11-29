@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Literal
 from tavily import TavilyClient
+from perplexity import Perplexity
 import os
 
 
@@ -9,14 +10,20 @@ class AgentConfig(BaseModel):
     """Configuration for the deep research agent - can be passed from UI"""
 
     # Search API settings
-    # TODO: Find and add web search apis that have full content extraction with search
-    search_api: Literal["tavily"] = Field(
+    search_api: Literal["tavily", "exa"] = Field(
         default="tavily",
         description="Which search API to use for research"
     )
 
+    max_subtopics: int = Field(
+        default=7,
+        ge=3,
+        le=10,
+        description="Maximum number of subtopics to search for in a topic"
+    )
+
     max_search_results: int = Field(
-        default=5,
+        default=7,
         ge=1,
         le=20,
         description="Maximum number of search results per query"
@@ -24,9 +31,9 @@ class AgentConfig(BaseModel):
 
     # Research depth settings
     max_research_depth: int = Field(
-        default=3,
+        default=5,
         ge=1,
-        le=5,
+        le=10,
         description="Maximum depth for multi-layer research (1-5)"
     )
 
@@ -68,3 +75,10 @@ if not tavily_api_key:
     raise ValueError("TAVILY_API_KEY environment variable is not set")
 
 tavily_client = TavilyClient(api_key=tavily_api_key)
+
+
+exa_api_key = os.getenv("EXA_API_KEY")
+if not exa_api_key:
+    raise ValueError("EXA_API_KEY environment variable is not set")
+
+exa_client = Perplexity(api_key=exa_api_key)

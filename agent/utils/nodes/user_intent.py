@@ -1,12 +1,12 @@
 from langgraph.types import RunnableConfig, interrupt
 from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
 from pydantic import create_model
-from utils.model import llm
+from utils.model import llm_quality, llm, evaluator_llm
 from utils.configuration import get_config_from_configurable
 
 
 
-async def check_user_intent(state: dict) -> dict:
+async def check_user_intent(state: dict, config: RunnableConfig) -> dict:
     """
     Check user intent at entry point with conversational context awareness.
     Routes to either:
@@ -15,6 +15,9 @@ async def check_user_intent(state: dict) -> dict:
     - "list_reports": User wants to see available reports
     - "revise_report": User wants to revise an existing report
     """
+    # Get agent configuration
+    agent_config = get_config_from_configurable(config.get("configurable", {}))
+
     topic = state.get("topic", "")
     messages = state.get("messages", [])
     last_viewed_report_id = state.get("last_viewed_report_id", "")
@@ -43,6 +46,7 @@ async def check_user_intent(state: dict) -> dict:
         reasoning=(str, ...)
     )
 
+    # Get model config and create structured output model
     structured_llm = llm.with_structured_output(IntentOutput)
 
     # Build context string for LLM
@@ -158,6 +162,7 @@ async def check_initial_context(state: dict, config: RunnableConfig) -> dict:
         reasoning=(str, ...),
         clarifying_question=(str, ...)  # Empty string if sufficient
     )
+
     topic_evaluation_llm = llm.with_structured_output(TopicEvaluation)
 
     evaluation_prompt = f"""

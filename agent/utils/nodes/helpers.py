@@ -1,9 +1,10 @@
 from langchain_core.messages import SystemMessage, HumanMessage
-from utils.model import evaluator_llm
+from utils.model import llm_quality, llm, evaluator_llm
+from utils.configuration import get_config_from_configurable
 from typing import Dict, List, Tuple
 from urllib.parse import urlparse
+from langgraph.types import RunnableConfig
 import re
-
 
 # Trusted domains for credibility scoring
 TRUSTED_DOMAINS = {
@@ -138,11 +139,14 @@ async def filter_quality_sources(
 
 
 
-async def evaluate_report(state: dict) -> dict:
+async def evaluate_report(state: dict, config: RunnableConfig) -> dict:
     """
     Evaluate a report based on content quality, structure, and evidence
     Provides detailed feedback for potential improvements
     """
+    # Get agent configuration
+    agent_config = get_config_from_configurable(config.get("configurable", {}))
+
     report_content = state.get("report_content", "")
     current_report_id = state.get("current_report_id", 0)
     topic = state.get("topic", "")
@@ -175,11 +179,10 @@ async def evaluate_report(state: dict) -> dict:
         HumanMessage(content=evaluation_prompt)
     ]
 
-    print("evaluate_report: using external evaluator (Gemini) for unbiased scoring")
     response = await evaluator_llm.ainvoke(messages)
     response_text = response.content if hasattr(response, 'content') else str(response)
 
     # DEBUG: Log the full response to understand Gemini's format
-    print(f"evaluate_report: FULL GEMINI RESPONSE:\n{response_text}\n---END RESPONSE---")
+    print(f"evaluate_report: FULL EVALUATOR RESPONSE:\n{response_text}\n---END RESPONSE---")
 
     return { **state }

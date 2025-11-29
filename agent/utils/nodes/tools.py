@@ -1,13 +1,11 @@
 from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
 from langgraph.prebuilt import ToolNode
 from utils.tools import report_tools
-from utils.model import llm
 import json
 
 
 
 report_tool_node = ToolNode(report_tools)
-llm_with_tools = llm.bind_tools(report_tools)
 
 
 async def call_report_tools(state: dict) -> dict:
