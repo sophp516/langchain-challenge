@@ -200,6 +200,31 @@ app.get('/api/threads', async (req, res) => {
   }
 })
 
+// Delete a thread
+app.delete('/api/threads/:threadId', async (req, res) => {
+  try {
+    const database = await connectToMongoDB()
+    
+    if (!database) {
+      return res.status(500).json({ error: 'Database connection failed' })
+    }
+    
+    const collection = database.collection(COLLECTION_NAME)
+    const { threadId } = req.params
+
+    const result = await collection.deleteOne({ thread_id: threadId })
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ error: 'Thread not found' })
+    }
+
+    res.json({ success: true, thread_id: threadId })
+  } catch (error) {
+    console.error('Error deleting thread:', error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
 // Health check
 app.get('/health', async (req, res) => {
   try {

@@ -31,6 +31,12 @@ function App() {
     if (savedConfig) {
       try {
         const parsed = JSON.parse(savedConfig)
+        // Sanitize config: ensure search_api is 'tavily' (not 'serper')
+        if (parsed.search_api && parsed.search_api !== 'tavily') {
+          parsed.search_api = 'tavily'
+          // Update localStorage with corrected value
+          localStorage.setItem('agentConfig', JSON.stringify({ ...defaultConfig, ...parsed }))
+        }
         setAgentConfig({ ...defaultConfig, ...parsed })
       } catch (e) {
         console.error('Failed to parse saved config:', e)

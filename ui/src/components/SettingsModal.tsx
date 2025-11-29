@@ -75,10 +75,10 @@ export function SettingsModal({ isOpen, onClose, onSave, currentConfig }: Settin
               <label>Search API</label>
               <select
                 value={config.search_api}
-                disabled
-                style={{ opacity: 0.7, cursor: 'not-allowed' }}
+                style={{ opacity: 0.7 }}
               >
                 <option value="tavily">Tavily</option>
+                <option value="exa">Exa</option>
               </select>
             </div>
             <div className="settings-field">

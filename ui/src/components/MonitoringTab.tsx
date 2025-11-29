@@ -1,9 +1,25 @@
 import { useState, useEffect } from 'react'
-import { getAllThreads, fetchThreadMessages } from '../services/db'
+import { getAllThreads, fetchThreadMessages, deleteThread } from '../services/db'
 import type { ThreadData, Message as ThreadMessage } from '../services/db'
-import { Loader2 } from 'lucide-react'
+import { Loader2, Trash2 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import './MonitoringTab.css'
+
+/**
+ * Convert reference format [1] Title (URL) to markdown links [1] [Title](URL)
+ */
+function convertReferencesToLinks(content: string): string {
+  // Pattern: [number] Title (URL)
+  // Convert to: [number] [Title](URL)
+  const referencePattern = /\[(\d+)\]\s+([^(]+?)\s+\(([^)]+)\)/g
+  
+  return content.replace(referencePattern, (_match, number, title, url) => {
+    // Trim whitespace from title
+    const trimmedTitle = title.trim()
+    // Return as markdown link
+    return `[${number}] [${trimmedTitle}](${url})`
+  })
+}
 
 function MonitoringTab() {
   const [threads, setThreads] = useState<ThreadData[]>([])
@@ -57,6 +73,30 @@ function MonitoringTab() {
     }).format(d)
   }
 
+  const handleDeleteThread = async (threadId: string, e: React.MouseEvent) => {
+    e.stopPropagation() // Prevent thread selection when clicking delete
+    
+    if (!window.confirm(`Are you sure you want to delete thread ${threadId}? This action cannot be undone.`)) {
+      return
+    }
+
+    try {
+      await deleteThread(threadId)
+      
+      // Remove from local state
+      setThreads(prev => prev.filter(t => t.thread_id !== threadId))
+      
+      // If deleted thread was selected, clear selection
+      if (selectedThreadId === threadId) {
+        setSelectedThreadId(undefined)
+        setMessages([])
+      }
+    } catch (error) {
+      console.error('Failed to delete thread:', error)
+      alert('Failed to delete thread. Please try again.')
+    }
+  }
+
   return (
     <div className="monitoring-tab">
       <div className="monitoring-header">
@@ -87,11 +127,21 @@ function MonitoringTab() {
                     className={`thread-item ${selectedThreadId === thread.thread_id ? 'selected' : ''}`}
                     onClick={() => setSelectedThreadId(thread.thread_id)}
                   >
-                    <div className="thread-id">{thread.thread_id}</div>
-                    <div className="thread-meta">
-                      <span className="thread-date">{formatDate(thread.created_at)}</span>
-                      <span className="thread-count">{thread.messages?.length || 0} messages</span>
+                    <div className="thread-content">
+                      <div className="thread-id">{thread.thread_id}</div>
+                      <div className="thread-meta">
+                        <span className="thread-date">{formatDate(thread.created_at)}</span>
+                        <span className="thread-count">{thread.messages?.length || 0} messages</span>
+                      </div>
                     </div>
+                    <button
+                      className="thread-delete-button"
+                      onClick={(e) => handleDeleteThread(thread.thread_id, e)}
+                      title="Delete thread"
+                      aria-label="Delete thread"
+                    >
+                      <Trash2 size={16} />
+                    </button>
                   </div>
                 ))}
               </div>
@@ -115,7 +165,7 @@ function MonitoringTab() {
                           <span className="message-role">{message.role === 'user' ? 'User' : 'Agent'}</span>
                         </div>
                         <div className="message-content">
-                          <ReactMarkdown>{message.content}</ReactMarkdown>
+                          <ReactMarkdown>{convertReferencesToLinks(message.content)}</ReactMarkdown>
                         </div>
                       </div>
                     ))}
