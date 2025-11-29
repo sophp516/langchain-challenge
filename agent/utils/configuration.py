@@ -9,7 +9,7 @@ class AgentConfig(BaseModel):
     """Configuration for the deep research agent - can be passed from UI"""
 
     # Search API settings
-    # TODO: Find and add web search apis that have full content extraction with search
+    # TODO: Add perplexity support
     search_api: Literal["tavily"] = Field(
         default="tavily",
         description="Which search API to use for research"
@@ -23,7 +23,7 @@ class AgentConfig(BaseModel):
     )
 
     max_search_results: int = Field(
-        default=5,
+        default=7,
         ge=1,
         le=20,
         description="Maximum number of search results per query"
@@ -31,9 +31,9 @@ class AgentConfig(BaseModel):
 
     # Research depth settings
     max_research_depth: int = Field(
-        default=3,
+        default=5,
         ge=1,
-        le=5,
+        le=10,
         description="Maximum depth for multi-layer research (1-5)"
     )
 
@@ -68,7 +68,7 @@ def get_config_from_configurable(configurable: dict) -> AgentConfig:
     config_dict = {k: v for k, v in configurable.items() if k in config_keys}
     return AgentConfig(**config_dict)
 
-
+# TODO: Add perplexity client
 # Initialize Web Search Clients
 tavily_api_key = os.getenv("TAVILY_API_KEY")
 if not tavily_api_key:

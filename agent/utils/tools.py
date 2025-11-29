@@ -2,6 +2,9 @@
 Tools for report retrieval and re.
 These tools can be called by the agent to fetch reports from the database.
 """
+from utils.model import llm
+from langchain_core.messages import SystemMessage, HumanMessage
+from utils.db import save_report
 from langchain_core.tools import tool
 from utils.db import (
     get_report_version,
@@ -164,10 +167,6 @@ async def revise_report(report_id: str, feedback: str, version_id: int = None) -
     if not mongodb_enabled:
         return {"error": "Database not available - cannot revise report"}
 
-    from utils.model import llm
-    from langchain_core.messages import SystemMessage, HumanMessage
-    from utils.db import save_report
-
     # Fetch the report version to revise
     if version_id:
         report = await get_report_version(report_id, version_id)
@@ -182,6 +181,7 @@ async def revise_report(report_id: str, feedback: str, version_id: int = None) -
 
     # Extract data from report
     current_content = report.get("content", "")
+    current_research_context = report.get("search_results", "")
     search_results = report.get("search_results", [])
 
     # Build research context from search results
@@ -209,8 +209,9 @@ async def revise_report(report_id: str, feedback: str, version_id: int = None) -
 
     **USER FEEDBACK:**
     {feedback}
-
-    {research_context}
+    
+    **RESEARCH CONTEXT:**
+    {current_research_context}
 
     **INSTRUCTIONS:**
     - Address the user's feedback while maintaining report quality and coherence

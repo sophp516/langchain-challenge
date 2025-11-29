@@ -189,11 +189,12 @@ Examples:
 
     return {
         "messages": [AIMessage(content=f"Generated research plan with {len(subtopics)} subtopics and gathered {total_sources} sources")],
-        "report_outline": outline,
+        "research_outline": outline,
         "sub_researchers": sub_researchers,
     }
 
 
+# TODO: Fix tendency of creating too many sections
 async def write_full_report(state: dict, config: RunnableConfig) -> dict:
     """
     Write the entire report in ONE LLM call for maximum coherence and efficiency.
@@ -210,8 +211,6 @@ async def write_full_report(state: dict, config: RunnableConfig) -> dict:
     print(f"write_full_report: generating complete report for topic='{topic[:50]}...' (revision {revision_count})")
     print(f"write_full_report: using summarized findings from subresearchers")
 
-    # NEW APPROACH: Use summarized_findings from each subresearcher
-    # Extract all sources from all subtopic reports and compile them
     all_summarized_findings = ""
     total_reports = 0
     all_sources_dict = {}  # Maps citation_number -> source_key
@@ -248,7 +247,6 @@ async def write_full_report(state: dict, config: RunnableConfig) -> dict:
         'ReportWithTitle',
         report_title=(str, ...),
         content=(str, ...),  # Full markdown report with ## headers
-        sources=(list[int], ...)  # List of source numbers actually cited in the report
     )
 
     report_prompt = f"""
@@ -257,73 +255,40 @@ Your task is to merge them into ONE cohesive, professional research report.
 
 **MAIN TOPIC**: {topic}
 
-**SUBTOPIC RESEARCH REPORTS** (each already has citations and sources):
+**SUBTOPIC RESEARCH REPORTS** (each has citations and sources):
 {all_summarized_findings}
 
 **CRITICAL REQUIREMENTS:**
 
-1. **ANTI-HALLUCINATION (MANDATORY)**:
-   - ONLY use information EXPLICITLY stated in the sources above
-   - EVERY fact, statistic, figure, name, or claim MUST have a citation [1], [2], etc.
-   - DO NOT use your general knowledge - if it's not in the sources, don't include it
-   - If you can't find a source for a claim, LEAVE IT OUT entirely
+1. **SOURCE FIDELITY & CITATION DISCIPLINE**:
+   - ONLY use information EXPLICITLY in the sources above - NO general knowledge
+   - EVERY factual sentence MUST end with citations [1], [2], etc.
+   - ONLY cite sources whose specific content appears in your text
+   - Use multiple sources per key point: "X happened [3][7][12]"
+   - Target 5-8 citations per paragraph minimum
 
-2. **PRESERVE ALL SOURCES AND CITATIONS**:
-   - Each subtopic report already has citations in [X] format - preserve them exactly
-   - DO NOT renumber citations - keep the original numbers from each report
-   - ALL sources from ALL subtopic reports must appear in the final merged report
-   - Synthesize information from MULTIPLE sources for each key point
+2. **COMPREHENSIVE EXPANSION (NOT SUMMARY)**:
+   - This is a FULL RESEARCH REPORT - EXPAND the subtopic reports, don't condense
+   - Each major section (##): 600-1000 words MINIMUM (strictly enforce)
+   - Each subsection (###): 200-300 words
+   - Final report should be LONGER than combined inputs
+   - Structure: 5-7 major sections (##), each with 3-5 subsections (###)
 
-3. **QUANTITATIVE DATA (REQUIRED for market/economic topics)**:
-   - Include EVERY specific number found in sources: revenue, market size, percentages, projections, dates
-   - Present data with full context: time periods, geographical scope, source organization
-   - Example: "According to the Ministry of Internal Affairs, elderly population reached 36 million in 2020, projected to rise to 39 million by 2050 [3]"
-   - Example: "The adaptive clothing market is growing at 9.8% CAGR from 2025-2033 [15]"
-   - Compare data points across sources when available
+3. **DETAILED, SPECIFIC CONTENT**:
+   - Include ALL specifics: named entities, exact numbers, dates, percentages, methodologies
+   - Use 4-6 sentences per paragraph MINIMUM
+   - Never use vague terms ("increased significantly") - use exact data with context
+   - Example: Instead of "AI improves communication [1]" → "Research by Smith et al. (2023) found AI-powered translation tools increased cross-cultural communication efficiency by 47% among multinational teams, with technical documentation translation reaching 89% accuracy and real-time video interpretation 76% accuracy [1]"
 
-4. **DETAILED SECTIONS - BALANCED COVERAGE**:
-   - Each major section MUST be 400-600 words minimum (enforce this strictly)
-   - All sections should have similar depth and detail - avoid having some sections more developed than others
-   - Include multiple subsections (use ### for subsections)
-   - Present information in depth, not superficially
-   - Use specific examples, case studies, and detailed explanations from sources
-   - Build comprehensive narrative by weaving together information from many sources
+4. **QUALITY STANDARDS**:
+   - Write in same language as topic using clear, academic style
+   - Use topic sentences and transition paragraphs to build progressive arguments
+   - Before submitting: verify 600+ words per section, 1 citation per sentence average, zero unsupported claims
 
-5. **CITATION DISCIPLINE (STRICTLY ENFORCED)**:
-   - EVERY sentence containing factual information MUST end with a citation
-   - Citations MUST be placed immediately after the fact: "X happened in 2020 [5]"
-   - Multi-source citations: "Population grew 15% [3][7][12]"
-   - ONLY cite sources whose information you actually used in the text
-   - Each paragraph should have 3-5 citations minimum
-   - General statements without citations will be considered hallucinations
-   - Format: Always use [X] format, never footnotes or other styles
+Return in 'content' field: Complete markdown report WITHOUT title or References section. Start with first ## section.
+Return in 'report_title' field: Clear, professional title.
 
-6. **REPORT STRUCTURE**:
-   - Generate a professional, refined title (in report_title field)
-   - Use markdown headers (## for main sections, ### for subsections)
-   - Write cohesive narrative that flows naturally
-   - Each section should be substantial and evidence-rich
-   - Organize logically with clear progression of ideas
-
-7. **QUALITY CHECKS**:
-   - Count your citations before submitting - include as many citations as appear in the subtopic reports
-   - Verify every citation number corresponds to actual information you used from that source
-   - Remove any placeholder citations or citations to sources not actually used
-   - Ensure no unsupported claims remain in the text
-
-8. **LANGUAGE**:
-   - Write in the same language as the topic so the user understands
-   - Use clear, professional language appropriate for a research report
-
-Return in 'content' field: Complete markdown report WITHOUT the title header or References section.
-Start directly with the first main section as a ## header.
-I will add the title and References section separately.
-
-Return in 'report_title' field: A clear, professional title for this report.
-
-Return in 'sources' field: A list of ALL source numbers you actually cited in the report (e.g., [1, 3, 5, 7, 12]).
-This should include EVERY source number that appears in your citations [X].
-CRITICAL: Only include sources you actually used. Do NOT include sources you didn't cite.
+CRITICAL: Only cite sources you actually used in the text.
 """
 
     messages = [
@@ -338,20 +303,21 @@ CRITICAL: Only include sources you actually used. Do NOT include sources you did
 
     report_content = response.content
     report_title = response.report_title
-    cited_source_numbers = response.sources  # Get sources from structured output
 
     print(f"write_full_report: generated report with title='{report_title}'")
 
-    # Use sources from structured output (primary method)
-    unique_citations = sorted(set(cited_source_numbers))
-
-    # Fallback: Extract citations from report text if structured output is empty
-    if not unique_citations:
-        print("write_full_report: WARNING - No sources in structured output, falling back to regex extraction")
-        citations_in_content = re.findall(r'\[(\d+)\]', report_content)
-        unique_citations = sorted(set(int(c) for c in citations_in_content if c.isdigit()))
+    # IMPORTANT: Use regex extraction from actual report content instead of structured output
+    # The structured output may include sources that aren't actually in the text
+    citations_in_content = re.findall(r'\[(\d+)\]', report_content)
+    unique_citations = sorted(set(int(c) for c in citations_in_content if c.isdigit()))
 
     citation_count = len(unique_citations)
+
+    # Remove consecutive duplicate citations like [7][7]
+    cleaned_content = report_content
+    # Find patterns like [X][X] and replace with [X]
+    cleaned_content = re.sub(r'\[(\d+)\](\[\1\])+', r'[\1]', cleaned_content)
+    report_content = cleaned_content
 
     print(f"write_full_report: Citations from structured output: {unique_citations[:20]}...")  # Show first 20
     print(f"write_full_report: Number of citations in report: {citation_count}")
@@ -382,7 +348,9 @@ CRITICAL: Only include sources you actually used. Do NOT include sources you did
 
     for seq_num in sorted(new_to_source_key.keys()):
         source_key = new_to_source_key[seq_num]
-        full_report += f"[{seq_num}] {source_key}\n"
+        # Format source as markdown link
+        formatted_source = format_source_as_markdown_link(source_key)
+        full_report += f"[{seq_num}] {formatted_source}\n"
 
     print(f"write_full_report: ✓ Renumbered {len(new_to_source_key)} sources sequentially (1-{len(new_to_source_key)})")
 
@@ -396,15 +364,6 @@ CRITICAL: Only include sources you actually used. Do NOT include sources you did
 
     new_version_id = state.get("version_id", 0) + 1
 
-    # Build search_results for MongoDB (maps subtopic → research data)
-    mongodb_search_results = {}
-    for researcher in sub_researchers:
-        subtopic_name = researcher.get("subtopic", "")
-        mongodb_search_results[subtopic_name] = {
-            "results": researcher.get("research_results", {}),
-            "credibilities": researcher.get("source_credibilities", {})
-        }
-
     # Save report to MongoDB
     try:
         await save_report(
@@ -412,7 +371,7 @@ CRITICAL: Only include sources you actually used. Do NOT include sources you did
             version_id=new_version_id,
             full_report=full_report,
             report_title=report_title,
-            search_results=mongodb_search_results,
+            search_results=all_summarized_findings,
             report_sections=[
                 {
                     "title": subtopic_item.get("subtopic", ""),

@@ -33,6 +33,7 @@ class UnifiedAgentState(TypedDict):
     subtopics: list[str]
     sub_researchers: list[dict]  # SubResearcherState as dict with credibility info
     report_subtopics: list[dict]  # List of written sections with citations
+    research_outline: dict
 
     # Report writing
     report_history: list[int]
