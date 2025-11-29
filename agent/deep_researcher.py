@@ -28,21 +28,21 @@ def create_agent(use_checkpointer=False):
 
     # Intent Routing Nodes
     workflow.add_node("check_user_intent", check_user_intent)
-    workflow.add_node("execute_and_format_tools", execute_and_format_tools)  # OPTIMIZED: creates tool call + executes + formats in one node
+    workflow.add_node("execute_and_format_tools", execute_and_format_tools)
 
-    # Topic Inquiry Nodes (OPTIMIZED: single LLM call for evaluation + question generation)
+    # Topic Inquiry Nodes
     workflow.add_node("check_initial_context", check_initial_context)
     workflow.add_node("ask_clarification", generate_clarification_question)
     workflow.add_node("collect_response", collect_user_response)
 
-    # Research Workflow Nodes - OPTIMIZED: combined outline + research in one node
+    # Research Workflow Nodes
     workflow.add_node("generate_plan_and_research", generate_plan_and_research)
     workflow.add_node("write_full_report", write_full_report)
-    workflow.add_node("evaluate_report", evaluate_report)
+    # workflow.add_node("evaluate_report", evaluate_report)
 
     workflow.set_entry_point("check_user_intent")
 
-    # Intent Routing - OPTIMIZED: skip call_report_tools, go directly to execute_and_format_tools
+    # Intent Routing
     workflow.add_conditional_edges(
         "check_user_intent",
         route_after_intent_check,
@@ -55,7 +55,7 @@ def create_agent(use_checkpointer=False):
     # Tool Flow: execute_and_format_tools does everything in one node, then END
     workflow.add_edge("execute_and_format_tools", END)
 
-    # Topic Inquiry Flow - OPTIMIZED: check_initial_context does evaluation + question generation in ONE LLM call
+    # Topic Inquiry Flow
     workflow.add_conditional_edges(
         "check_initial_context",
         route_after_initial_check,
@@ -72,10 +72,11 @@ def create_agent(use_checkpointer=False):
     # check_initial_context -> generate_clarification -> collect_response -> check_initial_context
     workflow.add_edge("collect_response", "check_initial_context")
 
-    # Research Flow - OPTIMIZED: generate_plan_and_research does outline + research in ONE node
+    # Research Flow
     workflow.add_edge("generate_plan_and_research", "write_full_report")
-    workflow.add_edge("write_full_report", "evaluate_report")
-    workflow.add_edge("evaluate_report", END)
+    workflow.add_edge("write_full_report", END)
+    # workflow.add_edge("write_full_report", "evaluate_report")
+    # workflow.add_edge("evaluate_report", END)
 
     if use_checkpointer:
         memory = MemorySaver()

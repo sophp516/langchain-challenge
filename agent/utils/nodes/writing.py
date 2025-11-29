@@ -157,7 +157,8 @@ Examples:
             "subtopic": subtopic_title,
             "research_results": result.get("research_results", {}),
             "source_credibilities": result.get("source_credibilities", {}),
-            "research_depth": result.get("research_depth", 1)
+            "research_depth": result.get("research_depth", 1),
+            "summarized_findings": result.get("summarized_findings", "")
         }
 
     # Execute all subresearchers in parallel
@@ -207,61 +208,40 @@ async def write_full_report(state: dict, config: RunnableConfig) -> dict:
     revision_count = state.get("revision_count", 0)
 
     print(f"write_full_report: generating complete report for topic='{topic[:50]}...' (revision {revision_count})")
-    print(f"write_full_report: using min_credibility_score={agent_config.min_credibility_score}")
+    print(f"write_full_report: using summarized findings from subresearchers")
 
-    # Build comprehensive research context from all subtopics
-    research_by_subtopic = {}
-    all_sources = []
-    total_sources = 0
+    # NEW APPROACH: Use summarized_findings from each subresearcher
+    # Extract all sources from all subtopic reports and compile them
+    all_summarized_findings = ""
+    total_reports = 0
+    all_sources_dict = {}  # Maps citation_number -> source_key
 
     for researcher in sub_researchers:
         subtopic = researcher.get("subtopic", "")
-        results = researcher.get("research_results", {})
-        credibilities = researcher.get("source_credibilities", {})
+        summarized_findings = researcher.get("summarized_findings", "")
 
-        # Filter and sort by credibility
-        credible_sources = [
-            (source, findings, credibilities.get(source, 0.5))
-            for source, findings in results.items()
-            if credibilities.get(source, 0.5) >= agent_config.min_credibility_score
-        ]
-        credible_sources.sort(key=lambda x: x[2], reverse=True)
-
-        research_by_subtopic[subtopic] = credible_sources[:25]  # Top 25 per subtopic
-        total_sources += len(credible_sources[:25])
-
-    print(f"write_full_report: {total_sources} total high-quality sources available")
-
-    # DEBUG: Show what we have
-    print(f"write_full_report: DEBUG - research_by_subtopic has {len(research_by_subtopic)} subtopics")
-    for subtopic_name, sources in research_by_subtopic.items():
-        print(f"  - {subtopic_name}: {len(sources)} sources")
-
-    # Build comprehensive sources string - USE RESEARCHER DATA DIRECTLY
-    all_sources_text = ""
-    source_index = 1
-    all_sources = []
-
-    # FIXED: Iterate through sub_researchers directly instead of trying to map through outline
-    for researcher in sub_researchers:
-        subtopic_name = researcher.get("subtopic", "")
-
-        if subtopic_name not in research_by_subtopic:
-            print(f"write_full_report: WARNING - '{subtopic_name}' not in research_by_subtopic!")
+        if not summarized_findings:
+            print(f"write_full_report: WARNING - No summarized findings for '{subtopic}'!")
             continue
 
-        sources_for_subtopic = research_by_subtopic[subtopic_name]
-        print(f"write_full_report: Processing '{subtopic_name}': {len(sources_for_subtopic)} sources")
+        # Extract sources from this researcher's "## Sources" section
+        if "## Sources" in summarized_findings:
+            sources_section = summarized_findings.split("## Sources")[-1]
+            source_lines = re.findall(r'\[(\d+)\]\s*(.+)', sources_section)
+            for source_num_str, source_key in source_lines:
+                source_num = int(source_num_str)
+                all_sources_dict[source_num] = source_key.strip()
 
-        all_sources_text += f"\n\n=== SOURCES FOR SUBTOPIC: {subtopic_name} ===\n"
+        all_summarized_findings += f"\n\n{'='*60}\n"
+        all_summarized_findings += f"RESEARCH FOR: {subtopic}\n"
+        all_summarized_findings += f"{'='*60}\n\n"
+        all_summarized_findings += summarized_findings
+        total_reports += 1
+        print(f"write_full_report: Including summarized findings for '{subtopic}' ({len(summarized_findings)} chars)")
 
-        for source, findings, credibility in sources_for_subtopic:
-            all_sources_text += f"\n[{source_index}] {source} (credibility: {credibility:.2f})\n{findings}\n"
-            all_sources.append(source)
-            source_index += 1
-
-    print(f"write_full_report: Built sources text with {source_index - 1} total sources")
-    print(f"write_full_report: all_sources_text length: {len(all_sources_text)} characters")
+    print(f"write_full_report: Compiled {total_reports} summarized research reports")
+    print(f"write_full_report: Total context length: {len(all_summarized_findings)} characters")
+    print(f"write_full_report: Total unique sources available: {len(all_sources_dict)}")
 
     # Generate report with structured output for title and sources
     report_with_title_model = create_model(
@@ -272,14 +252,13 @@ async def write_full_report(state: dict, config: RunnableConfig) -> dict:
     )
 
     report_prompt = f"""
-You are an expert research report writer. Write a comprehensive, professional research report on:
+You are an expert research synthesizer. You will receive {total_reports} comprehensive research reports on different subtopics.
+Your task is to merge them into ONE cohesive, professional research report.
 
-**TOPIC**: {topic}
+**MAIN TOPIC**: {topic}
 
-**TOTAL SOURCES AVAILABLE**: {total_sources} high-quality sources
-
-**ALL RESEARCH SOURCES** (cite using [1], [2], etc.):
-{all_sources_text}
+**SUBTOPIC RESEARCH REPORTS** (each already has citations and sources):
+{all_summarized_findings}
 
 **CRITICAL REQUIREMENTS:**
 
@@ -289,12 +268,11 @@ You are an expert research report writer. Write a comprehensive, professional re
    - DO NOT use your general knowledge - if it's not in the sources, don't include it
    - If you can't find a source for a claim, LEAVE IT OUT entirely
 
-2. **COMPREHENSIVE SOURCE UTILIZATION**:
-   - You MUST use AT LEAST 70% of available sources (aim for {int(total_sources * 0.7)}+ citations)
-   - Each major section should cite 10-20 different sources minimum
+2. **PRESERVE ALL SOURCES AND CITATIONS**:
+   - Each subtopic report already has citations in [X] format - preserve them exactly
+   - DO NOT renumber citations - keep the original numbers from each report
+   - ALL sources from ALL subtopic reports must appear in the final merged report
    - Synthesize information from MULTIPLE sources for each key point
-   - Extract ALL quantitative data, statistics, and specific examples from sources
-   - Create detailed, data-rich sections using the extensive research provided
 
 3. **QUANTITATIVE DATA (REQUIRED for market/economic topics)**:
    - Include EVERY specific number found in sources: revenue, market size, percentages, projections, dates
@@ -328,7 +306,7 @@ You are an expert research report writer. Write a comprehensive, professional re
    - Organize logically with clear progression of ideas
 
 7. **QUALITY CHECKS**:
-   - Count your citations before submitting - you should have {int(total_sources * 0.7)}+ unique source citations
+   - Count your citations before submitting - include as many citations as appear in the subtopic reports
    - Verify every citation number corresponds to actual information you used from that source
    - Remove any placeholder citations or citations to sources not actually used
    - Ensure no unsupported claims remain in the text
@@ -375,24 +353,38 @@ CRITICAL: Only include sources you actually used. Do NOT include sources you did
 
     citation_count = len(unique_citations)
 
-    print(f"write_full_report: Total sources available: {len(all_sources)}")
-    print(f"write_full_report: Citations from structured output: {unique_citations}")
-    print(f"write_full_report: Number of unique citations: {citation_count}")
+    print(f"write_full_report: Citations from structured output: {unique_citations[:20]}...")  # Show first 20
+    print(f"write_full_report: Number of citations in report: {citation_count}")
 
-    # Build references section with ONLY cited sources
-    full_report = f"# {report_title}\n\n{report_content}\n\n"
+    # RENUMBER SEQUENTIALLY: Map cited source numbers to sequential numbers (1,2,3...)
+    old_to_new_number = {}
+    new_to_source_key = {}
+    sequential_number = 1
+
+    for old_number in unique_citations:
+        if old_number in all_sources_dict:
+            old_to_new_number[old_number] = sequential_number
+            new_to_source_key[sequential_number] = all_sources_dict[old_number]
+            sequential_number += 1
+        else:
+            print(f"write_full_report: WARNING - Citation [{old_number}] not found in sources!")
+
+    # Replace all citations in the report with sequential numbers
+    renumbered_content = report_content
+    # Sort by old number descending to avoid replacing [1] before [10]
+    for old_num in sorted(old_to_new_number.keys(), reverse=True):
+        new_num = old_to_new_number[old_num]
+        renumbered_content = re.sub(rf'\[{old_num}\]', f'[{new_num}]', renumbered_content)
+
+    # Build references section with sequential numbering
+    full_report = f"# {report_title}\n\n{renumbered_content}\n\n"
     full_report += "## References\n\n"
 
-    # Only include sources that were actually cited
-    cited_sources = []
-    for citation_num in unique_citations:
-        if citation_num <= len(all_sources):
-            source = all_sources[citation_num - 1]  # citation_num is 1-indexed
-            formatted_source = format_source_as_markdown_link(source)
-            full_report += f"[{citation_num}] {formatted_source}\n"
-            cited_sources.append(source)
+    for seq_num in sorted(new_to_source_key.keys()):
+        source_key = new_to_source_key[seq_num]
+        full_report += f"[{seq_num}] {source_key}\n"
 
-    print(f"write_full_report: Number of sources added to references: {len(cited_sources)}")
+    print(f"write_full_report: ✓ Renumbered {len(new_to_source_key)} sources sequentially (1-{len(new_to_source_key)})")
 
     full_report_message = AIMessage(content=full_report)
 
@@ -425,9 +417,9 @@ CRITICAL: Only include sources you actually used. Do NOT include sources you did
                 {
                     "title": subtopic_item.get("subtopic", ""),
                     "subtopics": subtopic_item.get("subtopics", []),
-                    "source_count": len(research_by_subtopic.get(subtopic_item.get("subtopics", [""])[0], []))
+                    "source_count": len(sub_researchers[idx].get("research_results", {}))
                 }
-                for subtopic_item in subtopics
+                for idx, subtopic_item in enumerate(subtopics)
             ]
         )
         print(f"write_full_report: saved report {report_id} version {new_version_id} to MongoDB")

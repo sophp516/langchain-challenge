@@ -1,24 +1,6 @@
 version: '3.8'
 
 services:
-  # MongoDB service (required by backend)
-  mongodb:
-    image: mongo:7
-    container_name: langchain-mongodb
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongodb_data:/data/db
-    environment:
-      MONGO_INITDB_DATABASE: langchain_challenge
-    networks:
-      - langchain-network
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   # Backend service (Express + MongoDB)
   backend:
     build:
@@ -29,11 +11,9 @@ services:
       - "3001:3001"
     environment:
       - PORT=3001
-      - MONGODB_URI=mongodb://mongodb:27017/langchain_challenge
       - NODE_ENV=production
-    depends_on:
-      mongodb:
-        condition: service_healthy
+    env_file:
+      - .env
     networks:
       - langchain-network
     volumes:
@@ -57,7 +37,7 @@ services:
       # - SERPER_API_KEY=${SERPER_API_KEY}
       # - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       # - FIRECRAWL_API_KEY=${FIRECRAWL_API_KEY}
-    .env:
+    env_file:
       - .env
     networks:
       - langchain-network
@@ -94,7 +74,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  mongodb_data:
   agent_data:
 
 networks:

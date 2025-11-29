@@ -3,29 +3,31 @@ import { X } from 'lucide-react'
 import './SettingsModal.css'
 
 export interface AgentConfig {
-  search_api: 'tavily' | 'serper'
+  search_api: 'tavily'
   max_search_results: number
   max_research_depth: number
-  num_subtopics: number
+  max_subtopics: number
   max_clarification_rounds: number
-  min_report_score: number
   max_revision_rounds: number
-  enable_user_feedback: boolean
-  enable_cross_verification: boolean
   min_credibility_score: number
+  // UI-only fields (not in backend config)
+  min_report_score?: number
+  enable_user_feedback?: boolean
+  enable_cross_verification?: boolean
 }
 
 const defaultConfig: AgentConfig = {
   search_api: 'tavily',
   max_search_results: 5,
-  max_research_depth: 2,
-  num_subtopics: 4,
-  max_clarification_rounds: 3,
+  max_research_depth: 3,
+  max_subtopics: 7,
+  max_clarification_rounds: 0,
+  max_revision_rounds: 1,
+  min_credibility_score: 0.3,
+  // UI-only defaults
   min_report_score: 85,
-  max_revision_rounds: 2,
   enable_user_feedback: true,
-  enable_cross_verification: false,
-  min_credibility_score: 0.5
+  enable_cross_verification: false
 }
 
 interface SettingsModalProps {
@@ -73,10 +75,10 @@ export function SettingsModal({ isOpen, onClose, onSave, currentConfig }: Settin
               <label>Search API</label>
               <select
                 value={config.search_api}
-                onChange={(e) => setConfig({ ...config, search_api: e.target.value as 'tavily' | 'serper' })}
+                disabled
+                style={{ opacity: 0.7, cursor: 'not-allowed' }}
               >
                 <option value="tavily">Tavily</option>
-                <option value="serper">Serper</option>
               </select>
             </div>
             <div className="settings-field">
@@ -101,17 +103,17 @@ export function SettingsModal({ isOpen, onClose, onSave, currentConfig }: Settin
                 min="1"
                 max="5"
                 value={config.max_research_depth}
-                onChange={(e) => setConfig({ ...config, max_research_depth: parseInt(e.target.value) || 2 })}
+                onChange={(e) => setConfig({ ...config, max_research_depth: parseInt(e.target.value) || 3 })}
               />
             </div>
             <div className="settings-field">
-              <label>Number of Subtopics (2-10)</label>
+              <label>Max Subtopics (3-10)</label>
               <input
                 type="number"
-                min="2"
+                min="3"
                 max="10"
-                value={config.num_subtopics}
-                onChange={(e) => setConfig({ ...config, num_subtopics: parseInt(e.target.value) || 4 })}
+                value={config.max_subtopics}
+                onChange={(e) => setConfig({ ...config, max_subtopics: parseInt(e.target.value) || 7 })}
               />
             </div>
           </div>
@@ -126,7 +128,7 @@ export function SettingsModal({ isOpen, onClose, onSave, currentConfig }: Settin
                 min="0"
                 max="10"
                 value={config.max_clarification_rounds}
-                onChange={(e) => setConfig({ ...config, max_clarification_rounds: parseInt(e.target.value) || 3 })}
+                onChange={(e) => setConfig({ ...config, max_clarification_rounds: parseInt(e.target.value) || 0 })}
               />
             </div>
           </div>
@@ -151,7 +153,7 @@ export function SettingsModal({ isOpen, onClose, onSave, currentConfig }: Settin
                 min="0"
                 max="5"
                 value={config.max_revision_rounds}
-                onChange={(e) => setConfig({ ...config, max_revision_rounds: parseInt(e.target.value) || 2 })}
+                onChange={(e) => setConfig({ ...config, max_revision_rounds: parseInt(e.target.value) || 1 })}
               />
             </div>
           </div>
@@ -192,7 +194,7 @@ export function SettingsModal({ isOpen, onClose, onSave, currentConfig }: Settin
                 max="1"
                 step="0.1"
                 value={config.min_credibility_score}
-                onChange={(e) => setConfig({ ...config, min_credibility_score: parseFloat(e.target.value) || 0.5 })}
+                onChange={(e) => setConfig({ ...config, min_credibility_score: parseFloat(e.target.value) || 0.3 })}
               />
             </div>
           </div>

@@ -2,7 +2,7 @@ langchain
 langchain-openai
 langchain-core
 langchain-community
-langchain-google-vertexai
+langchain-google-genai
 langgraph
 pydantic
 tavily-python

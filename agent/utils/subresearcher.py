@@ -7,6 +7,7 @@ from utils.configuration import tavily_client
 from utils.nodes.helpers import filter_quality_sources
 import asyncio
 from urllib.parse import urlparse
+import re
 
 
 class SubResearcherGraphState(TypedDict):
@@ -24,6 +25,7 @@ class SubResearcherGraphState(TypedDict):
     source_credibilities: dict[str, float]
     source_relevance_scores: dict[str, float]  # Track search API relevance scores
     research_depth: int
+    summarized_findings: str  # Synthesized summary of key findings with source attribution
 
     # Config
     max_search_results: int
@@ -861,6 +863,179 @@ async def assess_quality(state: SubResearcherGraphState) -> dict:
     }
 
 
+async def summarize_findings(state: SubResearcherGraphState) -> dict:
+    """
+    NEW FINAL NODE: Synthesize research findings into a COMPREHENSIVE, organized report.
+
+    CRITICAL REQUIREMENTS:
+    1. Include ALL information from ALL sources (nothing should be lost)
+    2. Organize information thematically for better readability
+    3. Preserve ALL sources with inline citations
+    4. Return a complete report that can be merged with other subtopic reports
+    5. The output should be LONGER and more comprehensive, not shorter
+
+    Benefits:
+    - Better organization for the writer LLM
+    - All key information is extracted and cited
+    - ALL sources are preserved with proper attribution
+    - Ready to be merged into the final report
+    """
+    research_results = state.get("research_results", {})
+    credibilities = state.get("source_credibilities", {})
+    subtopic = state.get("subtopic", "Unknown Subtopic")
+    main_topic = state.get("main_topic", "")
+
+    if not research_results:
+        print(f"[SUMMARIZE] No results to summarize for '{subtopic}'")
+        return {
+            "summarized_findings": f"No research findings available for {subtopic}."
+        }
+
+    print(f"[SUMMARIZE] Creating comprehensive findings report for '{subtopic}' from {len(research_results)} sources...")
+
+    # Sort sources by credibility
+    sorted_sources = sorted(
+        research_results.items(),
+        key=lambda x: credibilities.get(x[0], 0.5),
+        reverse=True
+    )
+
+    # Build source list using source keys (not numbers yet)
+    # Create a mapping from short IDs to full source keys for easier citation
+    sources_text = ""
+    source_key_to_id = {}  # Maps full source_key to short ID like "src1", "src2"
+    id_to_source_key = {}  # Reverse mapping
+
+    for idx, (source_key, content) in enumerate(sorted_sources, start=1):
+        credibility = credibilities.get(source_key, 0.5)
+        short_id = f"src{idx}"
+        source_key_to_id[source_key] = short_id
+        id_to_source_key[short_id] = source_key
+
+        # Include full content (or substantial portion)
+        content_to_use = content[:2500] if len(content) > 2500 else content
+        sources_text += f"\n[{short_id}] {source_key} (credibility: {credibility:.2f})\n{content_to_use}\n"
+
+    # Create comprehensive summarization prompt
+    summarization_prompt = f"""You are a research synthesis specialist. Create a COMPREHENSIVE, organized report from ALL research findings.
+
+MAIN TOPIC: {main_topic}
+SUBTOPIC: {subtopic}
+
+RESEARCH SOURCES - ALL {len(sorted_sources)} SOURCES (cite using [src1], [src2], etc.):
+{sources_text}
+
+CRITICAL REQUIREMENTS:
+
+1. **COMPREHENSIVE COVERAGE - USE ALL SOURCES**:
+   - You MUST incorporate information from ALL {len(sorted_sources)} sources
+   - Do NOT summarize or condense - EXPAND and organize
+   - Include ALL specific data, statistics, examples, and details from every source
+   - Repeat key information verbatim from sources when important
+   - This report should be LONGER than the raw sources, not shorter
+
+2. **ORGANIZATION**:
+   - Organize findings into 4-8 clear thematic sections
+   - Use descriptive headers (## format)
+   - Within each section, include ALL relevant information from sources
+   - Use bullet points or paragraphs as appropriate for readability
+
+3. **CITATION DISCIPLINE**:
+   - EVERY fact, statistic, claim, or piece of information MUST have a citation using the source IDs
+   - Use inline citations immediately after each fact: "X happened [src3]"
+   - Multiple sources for the same fact: "Y increased 15% [src2][src7][src12]"
+   - Every source ID from [src1] to [src{len(sorted_sources)}] should appear at least once
+   - If a source doesn't fit naturally, create an "Additional Findings" section
+
+4. **CONTENT RICHNESS**:
+   - Extract and include ALL quantitative data: numbers, percentages, dates, projections
+   - Include ALL named entities: organizations, people, specific programs, studies
+   - Include ALL specific examples and case studies mentioned
+   - Include ALL context: time periods, geographical scope, methodologies
+
+5. **NO SOURCES SECTION YET**:
+   - Do NOT include a "## Sources" section in your output
+   - I will add the sources section separately with proper numbering
+   - Just use the [srcX] citations in your text
+
+6. **LENGTH EXPECTATION**:
+   - Target length: 800-2000 words (or more if needed to cover all sources)
+   - Each major section: 200-400 words minimum
+   - Be thorough, not brief
+
+REMEMBER: A later LLM will merge this with other subtopic reports, so having ALL sources and ALL information is CRITICAL. Don't lose anything!
+
+Return the complete organized report with inline citations using [srcX] format.
+"""
+
+    try:
+        messages = [
+            SystemMessage(content="You are a research synthesis specialist. Create comprehensive, well-organized reports that preserve ALL information from ALL sources with proper citations."),
+            HumanMessage(content=summarization_prompt)
+        ]
+
+        response = await llm_quality.ainvoke(messages)
+        summarized_findings = response.content
+
+        print(f"[SUMMARIZE] Generated comprehensive report for '{subtopic}' ({len(summarized_findings)} chars)")
+
+        # Extract which source IDs were actually cited (e.g., src1, src5, src12)
+        citation_matches = re.findall(r'\[src(\d+)\]', summarized_findings)
+        cited_src_ids = set(f"src{c}" for c in citation_matches if c.isdigit())
+
+        print(f"[SUMMARIZE] Found {len(cited_src_ids)} cited sources out of {len(sorted_sources)} available")
+
+        # Now renumber citations sequentially and build sources list
+        # Map old src IDs to new sequential numbers
+        src_id_to_number = {}
+        number_to_source_key = {}
+        current_number = 1
+
+        # First pass: assign numbers to cited sources in order of appearance
+        for src_id in sorted(cited_src_ids, key=lambda x: int(x.replace('src', ''))):
+            src_id_to_number[src_id] = current_number
+            source_key = id_to_source_key.get(src_id, "Unknown Source")
+            number_to_source_key[current_number] = source_key
+            current_number += 1
+
+        # Replace all [srcX] with [numbered] citations
+        final_report = summarized_findings
+        # Sort by src number descending to avoid replacing src1 before src10
+        for src_id in sorted(cited_src_ids, key=lambda x: int(x.replace('src', '')), reverse=True):
+            new_number = src_id_to_number[src_id]
+            final_report = re.sub(rf'\[{src_id}\]', f'[{new_number}]', final_report)
+
+        # Add Sources section with sequential numbering
+        final_report += "\n\n## Sources\n\n"
+        for number in sorted(number_to_source_key.keys()):
+            source_key = number_to_source_key[number]
+            final_report += f"[{number}] {source_key}\n"
+
+        print(f"[SUMMARIZE] ✓ Renumbered {len(cited_src_ids)} sources sequentially (1-{len(cited_src_ids)})")
+
+        return {
+            "summarized_findings": final_report
+        }
+
+    except Exception as e:
+        print(f"[SUMMARIZE] Summarization failed: {e}")
+        # Fallback: return all sources in a simple format
+        fallback_summary = f"## Research Findings for {subtopic}\n\n"
+        fallback_summary += f"Comprehensive findings from {len(research_results)} sources:\n\n"
+
+        for idx, (source_key, content) in enumerate(sorted_sources, start=1):
+            fallback_summary += f"### Source [{idx}]: {source_key[:150]}\n\n"
+            fallback_summary += f"{content}\n\n"
+
+        fallback_summary += "## Sources\n\n"
+        for idx, source_key in enumerate(all_source_keys, start=1):
+            fallback_summary += f"[{idx}] {source_key}\n"
+
+        return {
+            "summarized_findings": fallback_summary
+        }
+
+
 # ============================================================================
 # GRAPH CREATION
 # ============================================================================
@@ -897,6 +1072,7 @@ def create_subresearcher_graph():
     5. deep_dive_research: Research discovered entities and fill gaps
        → Loop back to assess_coverage_and_gaps (iterative deepening)
     6. assess_quality: Filter and score final sources
+    7. summarize_findings: Create comprehensive organized report with ALL sources
 
     The graph can loop through steps 3-5 multiple times until max_depth is reached
     or coverage is satisfactory.
@@ -906,6 +1082,7 @@ def create_subresearcher_graph():
     - All planned searches run in parallel for maximum efficiency
     - Uses pre-generated plan from generate_research_plan
     - Iterative deepening based on coverage assessment
+    - Final summarization node organizes findings for writer LLM
     """
     workflow = StateGraph(SubResearcherGraphState)
 
@@ -915,6 +1092,7 @@ def create_subresearcher_graph():
     workflow.add_node("assess_coverage", assess_coverage_and_gaps)
     workflow.add_node("deep_dive", deep_dive_research)
     workflow.add_node("assess_quality", assess_quality)
+    workflow.add_node("summarize", summarize_findings)
 
     # Unified research flow
     workflow.set_entry_point("plan_research")
@@ -933,7 +1111,10 @@ def create_subresearcher_graph():
 
     # After deep dive, re-assess coverage (may trigger another round)
     workflow.add_edge("deep_dive", "assess_coverage")
-    workflow.add_edge("assess_quality", END)
+
+    # After quality assessment, summarize findings
+    workflow.add_edge("assess_quality", "summarize")
+    workflow.add_edge("summarize", END)
 
     return workflow.compile()
 

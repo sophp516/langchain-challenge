@@ -9,14 +9,15 @@ type Tab = 'chat' | 'monitoring'
 const defaultConfig: AgentConfig = {
   search_api: 'tavily',
   max_search_results: 5,
-  max_research_depth: 2,
-  num_subtopics: 4,
-  max_clarification_rounds: 3,
+  max_research_depth: 3,
+  max_subtopics: 7,
+  max_clarification_rounds: 0,
+  max_revision_rounds: 1,
+  min_credibility_score: 0.3,
+  // UI-only defaults
   min_report_score: 85,
-  max_revision_rounds: 2,
   enable_user_feedback: true,
-  enable_cross_verification: false,
-  min_credibility_score: 0.5
+  enable_cross_verification: false
 }
 
 function App() {
