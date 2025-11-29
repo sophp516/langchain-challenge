@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Literal
 from tavily import TavilyClient
+from perplexity import Perplexity
 import os
 
 
@@ -9,8 +10,7 @@ class AgentConfig(BaseModel):
     """Configuration for the deep research agent - can be passed from UI"""
 
     # Search API settings
-    # TODO: Add perplexity support
-    search_api: Literal["tavily"] = Field(
+    search_api: Literal["tavily", "exa"] = Field(
         default="tavily",
         description="Which search API to use for research"
     )
@@ -68,10 +68,17 @@ def get_config_from_configurable(configurable: dict) -> AgentConfig:
     config_dict = {k: v for k, v in configurable.items() if k in config_keys}
     return AgentConfig(**config_dict)
 
-# TODO: Add perplexity client
+
 # Initialize Web Search Clients
 tavily_api_key = os.getenv("TAVILY_API_KEY")
 if not tavily_api_key:
     raise ValueError("TAVILY_API_KEY environment variable is not set")
 
 tavily_client = TavilyClient(api_key=tavily_api_key)
+
+
+exa_api_key = os.getenv("EXA_API_KEY")
+if not exa_api_key:
+    raise ValueError("EXA_API_KEY environment variable is not set")
+
+exa_client = Perplexity(api_key=exa_api_key)

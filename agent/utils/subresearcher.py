@@ -2,13 +2,17 @@ from typing import TypedDict
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
 from pydantic import create_model
-from utils.model import llm_quality, llm
-from utils.configuration import tavily_client
+from utils.model import llm_quality
+from utils.configuration import tavily_client, exa_client
 from utils.nodes.helpers import filter_quality_sources
 import asyncio
 from urllib.parse import urlparse
 import re
 
+
+# ============================================================================
+# STATE DEFINITION
+# ============================================================================
 
 class SubResearcherGraphState(TypedDict):
     # State for the subresearcher subgraph with iterative deepening
@@ -169,6 +173,15 @@ async def parallel_search_with_rate_limit(
 
                         # Additional delay after successful request
                         await asyncio.sleep(0.5)
+                    elif search_api == "exa":
+                        search_results = await loop.run_in_executor(
+                            None,
+                            lambda: exa_client.search_and_contents(query, text=True, type = "auto")
+                        )
+                        results_list = search_results.get("results", [])[:max_results]
+
+                        await asyncio.sleep(0.5)
+
 
                     return (query, results_list, metadata)
 
@@ -199,46 +212,89 @@ async def parallel_search_with_rate_limit(
 
 
 # ============================================================================
+# SEARCH HELPER FUNCTIONS
+# ============================================================================
+
+async def _search_single_entity(entity: str, main_topic: str, search_api: str, max_results: int) -> list[dict]:
+    """Execute a single entity search with rate limiting and error handling."""
+    query = f"{entity} {main_topic}"
+    await asyncio.sleep(1.5)  # Rate limiting
+
+    try:
+        loop = asyncio.get_event_loop()
+
+        if search_api == "tavily":
+            results = await loop.run_in_executor(
+                None,
+                lambda: tavily_client.search(query=query, max_results=max_results)
+            )
+            await asyncio.sleep(0.5)
+            return results.get("results", [])[:max_results]
+
+        elif search_api == "exa":
+            results = await loop.run_in_executor(
+                None,
+                lambda: exa_client.search_and_contents(query, text=True, type="auto")
+            )
+            await asyncio.sleep(0.5)
+            return results.get("results", [])[:max_results]
+
+    except Exception as e:
+        error_str = str(e).lower()
+        if "rate" in error_str or "excessive" in error_str or "blocked" in error_str:
+            print(f"[Deep research]   - Search rate limited for {entity}, waiting...")
+            await asyncio.sleep(5.0)
+        print(f"[Deep research]   - Search failed for {entity}: {e}")
+        return []
+
+    return []
+
+
+async def _research_single_entity(entity: str, main_topic: str, search_api: str, max_results: int) -> dict[str, str]:
+    """Research a single entity and return results as dict."""
+    print(f"[Deep research]   - {entity}")
+
+    results = await _search_single_entity(entity, main_topic, search_api, max_results)
+
+    # Convert to dict
+    entity_results = {}
+    for result in results:
+        source_url = result.get("url", "")
+        source_title = result.get("title", "Untitled")
+        source_content = result.get("content", "")
+
+        if source_content:
+            source_key = f"{source_title} ({source_url})"
+            entity_results[source_key] = source_content
+
+    print(f"[Deep research]   - {entity}: found {len(entity_results)} sources")
+    return entity_results
+
+
+def _convert_results_to_dict(results: list[dict]) -> dict[str, str]:
+    """Convert search results list to dict with source_key -> content mapping."""
+    results_dict = {}
+    for result in results:
+        source_url = result.get("url", "")
+        source_title = result.get("title", "Untitled")
+        source_content = result.get("content", "")
+
+        if source_content:
+            source_key = f"{source_title} ({source_url})" if source_url else source_title
+            results_dict[source_key] = source_content
+
+    return results_dict
+
+
+
+# ============================================================================
 # ITERATIVE DEEPENING NODES
 # ============================================================================
 
-async def plan_research_strategy(state: SubResearcherGraphState) -> dict:
-    """
-    OPTIMIZATION: Research plans are now pre-generated during outline creation.
-    This node simply validates and returns the pre-generated plan.
-
-    This saves 1 LLM call per section (typically 3-5 calls per report).
-    """
-    pre_generated_plan = state.get("research_plan", [])
-    section_title = state.get("subtopic", "")
-
-    # All research plans should be pre-generated by write_outline()
-    if not pre_generated_plan or len(pre_generated_plan) == 0:
-        raise ValueError(
-            f"No pre-generated research plan found for section '{section_title}'. "
-            "Outline generation should create research plans for all sections."
-        )
-
-    print(f"[RESEARCH PLANNING] Using pre-generated plan from outline (saved 1 LLM call)")
-    print(f"  Section: {section_title}")
-    print(f"  Plan has {len(pre_generated_plan)} searches:")
-    for search in pre_generated_plan[:3]:
-        priority = search.get("priority", "unknown")
-        query = search.get("query", "")[:60]
-        print(f"    - [{priority.upper()}] {query}...")
-
-    if len(pre_generated_plan) > 3:
-        print(f"    ... and {len(pre_generated_plan) - 3} more")
-
-    return {
-        "research_plan": pre_generated_plan,
-        "completed_searches": 0
-    }
-
-
 async def execute_research(state: SubResearcherGraphState) -> dict:
     """
-    Uses pre-generated research plan from generate_plan_and_research.
+    Execute research using pre-generated plan from outline creation.
+    The research plan is pre-generated during outline creation, saving 1 LLM call per section.
     """
     research_plan = state.get("research_plan", [])
     search_api = state.get("search_api", "tavily")
@@ -316,7 +372,6 @@ async def execute_research(state: SubResearcherGraphState) -> dict:
             source_url = result.get("url", "")
             source_title = result.get("title", "Untitled")
             source_content = result.get("content", "")
-            print(f"  [{source_title}] {source_content}")
             search_score = result.get("score", 0.0)
 
             if source_content:
@@ -362,143 +417,44 @@ async def execute_research(state: SubResearcherGraphState) -> dict:
 
 async def deep_research_entities(state: SubResearcherGraphState) -> dict:
     """
-    Deep research on each extracted entity.
-    For each entity, searches academic + news + social sources simultaneously.
+    Deep research on each extracted entity using unified search.
     Combines with initial results.
     """
     entities = state.get("entities", [])
     main_topic = state.get("main_topic", "")
     search_api = state.get("search_api", "tavily")
-    max_results = state.get("max_search_results", 3)
+    max_results = state.get("max_search_results", 5)
     initial_results = state.get("research_results", {})
 
     if not entities:
         print(f"[Deep research] No entities to research, keeping initial results")
         return {}
 
-    print(f"[Deep research] Deep research on {len(entities)} entities with parallel search strategies...")
+    print(f"[Deep research] Deep research on {len(entities)} entities...")
 
-    async def search_academic(entity: str):
-        """Search academic/research sources for entity"""
-        # Trust search API's ranking - no site restrictions
-        academic_query = f"{entity} {main_topic} academic research papers"
-        await asyncio.sleep(1.5)  # Rate limiting
-        try:
-            if search_api == "tavily":
-                loop = asyncio.get_event_loop()
-                results = await loop.run_in_executor(
-                    None,
-                    lambda: tavily_client.search(query=academic_query, max_results=max_results)
-                )
-                await asyncio.sleep(0.5)  # Additional delay after request
-                return results.get("results", [])[:max_results]
-        except Exception as e:
-            error_str = str(e).lower()
-            if "rate" in error_str or "excessive" in error_str or "blocked" in error_str:
-                print(f"[Deep research]   - Academic search rate limited for {entity}, waiting...")
-                await asyncio.sleep(5.0)  # Wait longer on rate limit
-            print(f"[Deep research]   - Academic search failed for {entity}: {e}")
-            return []
 
-    async def search_news(entity: str):
-        """Search news sources for entity"""
-        # Trust search API's ranking - no site restrictions
-        news_query = f"{entity} {main_topic} latest news updates"
-        await asyncio.sleep(1.5)  # Rate limiting
-        try:
-            if search_api == "tavily":
-                loop = asyncio.get_event_loop()
-                results = await loop.run_in_executor(
-                    None,
-                    lambda: tavily_client.search(query=news_query, max_results=max_results)
-                )
-                await asyncio.sleep(0.5)  # Additional delay after request
-                return results.get("results", [])[:max_results]
-        except Exception as e:
-            error_str = str(e).lower()
-            if "rate" in error_str or "excessive" in error_str or "blocked" in error_str:
-                print(f"[Deep research]   - News search rate limited for {entity}, waiting...")
-                await asyncio.sleep(5.0)  # Wait longer on rate limit
-            print(f"[Deep research]   - News search failed for {entity}: {e}")
-            return []
+    # Limit to 2 entities at a time to avoid rate limits
+    entity_semaphore = asyncio.Semaphore(2)
 
-    async def search_social_web(entity: str):
-        """Search general web and social sources for entity"""
-        general_query = f"{entity} {main_topic}"
-        await asyncio.sleep(1.5)  # Rate limiting
-        try:
-            if search_api == "tavily":
-                loop = asyncio.get_event_loop()
-                results = await loop.run_in_executor(
-                    None,
-                    lambda: tavily_client.search(query=general_query, max_results=max_results)
-                )
-                await asyncio.sleep(0.5)  # Additional delay after request
-                return results.get("results", [])[:max_results]
-        except Exception as e:
-            error_str = str(e).lower()
-            if "rate" in error_str or "excessive" in error_str or "blocked" in error_str:
-                print(f"[Deep research]   - Social/web search rate limited for {entity}, waiting...")
-                await asyncio.sleep(5.0)  # Wait longer on rate limit
-            print(f"[Deep research]   - Social/web search failed for {entity}: {e}")
-            return []
+    async def throttled_research(entity: str):
+        async with entity_semaphore:
+            return await _research_single_entity(entity, main_topic, search_api, max_results)
 
-    async def research_entity_parallel(entity: str):
-        """Research a single entity with parallel search strategies"""
-        print(f"[Deep research]   - {entity}: parallel searches (academic + news + social)")
-
-        # Run all 3 searches in parallel
-        academic_results, news_results, social_results = await asyncio.gather(
-            search_academic(entity),
-            search_news(entity),
-            search_social_web(entity)
-        )
-
-        # Combine all results
-        all_results = academic_results + news_results + social_results
-
-        # Convert to dict
-        entity_results = {}
-        for result in all_results:
-            source_url = result.get("url", "")
-            source_title = result.get("title", "Untitled")
-            source_content = result.get("content", "")
-
-            if source_content:
-                source_key = f"{source_title} ({source_url})"
-                entity_results[source_key] = source_content
-
-        print(f"[Deep research]   - {entity}: found {len(entity_results)} sources (academic={len(academic_results)}, news={len(news_results)}, social={len(social_results)})")
-        return entity_results
-
-    # Research all entities with rate limiting
-    # Use semaphore to limit concurrent entity research (each entity does 3 searches)
-    all_entity_results = []
-    if search_api == "tavily":
-        # Limit to 1 entity at a time to avoid rate limits (each entity = 3 searches)
-        entity_semaphore = asyncio.Semaphore(1)
-        
-        async def throttled_entity_research(entity: str):
-            async with entity_semaphore:
-                return await research_entity_parallel(entity)
-        
-        tasks = [throttled_entity_research(entity) for entity in entities]
-        all_entity_results = await asyncio.gather(*tasks)
+    tasks = [throttled_research(entity) for entity in entities]
+    all_entity_results = await asyncio.gather(*tasks)
 
     # Combine all results (initial + entity research) with relevance tracking
     combined_results = {**initial_results}
     combined_relevance = state.get("source_relevance_scores", {}).copy()
 
-    entity_idx = 0
-    for entity_results in all_entity_results:
+    for entity_idx, entity_results in enumerate(all_entity_results):
         for source_key, content in entity_results.items():
             combined_results[source_key] = content
             # Deep research sources: relevance based on entity order (earlier entities = more important)
             if source_key not in combined_relevance:
-                combined_relevance[source_key] = 0.7 - (entity_idx * 0.1)  # Start at 0.7, decrease by entity
-        entity_idx += 1
+                combined_relevance[source_key] = 0.7 - (entity_idx * 0.1)
 
-    print(f"[Deep research] Combined total: {len(combined_results)} sources from parallel searches")
+    print(f"[Deep research] Combined total: {len(combined_results)} sources")
 
     # Print sample of deep research findings
     if all_entity_results:
@@ -1089,40 +1045,36 @@ def create_subresearcher_graph():
     Create the subresearcher graph with UNIFIED ITERATIVE RESEARCH and DYNAMIC DEEPENING.
 
     Flow:
-    1. plan_research_strategy: Validate pre-generated research plan from outline
-    2. execute_unified_research: Execute ALL searches (primary + targeted) in parallel
-    3. assess_coverage_and_gaps: Analyze coverage, discover entities/gaps
-    4. Routing decision:
+    1. execute_research: Execute ALL searches from pre-generated plan in parallel
+    2. assess_coverage_and_gaps: Analyze coverage, discover entities/gaps
+    3. Routing decision:
        - If coverage low OR important entities discovered → deep_dive_research
        - If coverage good → assess_quality
-    5. deep_dive_research: Research discovered entities and fill gaps
+    4. deep_dive_research: Research discovered entities and fill gaps
        → Loop back to assess_coverage_and_gaps (iterative deepening)
-    6. assess_quality: Filter and score final sources
-    7. summarize_findings: Create comprehensive organized report with ALL sources
+    5. assess_quality: Filter and score final sources
+    6. summarize_findings: Create comprehensive organized report with ALL sources
 
-    The graph can loop through steps 3-5 multiple times until max_depth is reached
+    The graph can loop through steps 2-4 multiple times until max_depth is reached
     or coverage is satisfactory.
 
     IMPROVEMENTS:
-    - Unified research execution (no separate broad/targeted steps)
+    - Research plan pre-generated during outline creation (saved 1 LLM call per section)
     - All planned searches run in parallel for maximum efficiency
-    - Uses pre-generated plan from generate_research_plan
     - Iterative deepening based on coverage assessment
     - Final summarization node organizes findings for writer LLM
     """
     workflow = StateGraph(SubResearcherGraphState)
 
     # Add nodes
-    workflow.add_node("plan_research", plan_research_strategy)
     workflow.add_node("research", execute_research)
     workflow.add_node("assess_coverage", assess_coverage_and_gaps)
     workflow.add_node("deep_dive", deep_dive_research)
     workflow.add_node("assess_quality", assess_quality)
     workflow.add_node("summarize", summarize_findings)
 
-    # Unified research flow
-    workflow.set_entry_point("plan_research")
-    workflow.add_edge("plan_research", "research")
+    # Unified research flow - start directly with execution
+    workflow.set_entry_point("research")
     workflow.add_edge("research", "assess_coverage")
 
     # Either deepen or finish

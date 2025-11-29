@@ -250,12 +250,12 @@ async def write_full_report(state: dict, config: RunnableConfig) -> dict:
     )
 
     report_prompt = f"""
-You are an expert research synthesizer. You will receive {total_reports} comprehensive research reports on different subtopics.
-Your task is to merge them into ONE cohesive, professional research report.
+Based on all the research conducted, create a comprehensive, cohesive, professional research report that answers the main topic. 
+Provide a balanced, thorough analysis. Be as comprehensive as possible, and include all information that is relevant to the overall research question. People are using you for deep research and will expect detailed, comprehensive answers.
 
 **MAIN TOPIC**: {topic}
 
-**SUBTOPIC RESEARCH REPORTS** (each has citations and sources):
+**RESEARCH RESULTS** (each has citations and sources):
 {all_summarized_findings}
 
 **CRITICAL REQUIREMENTS:**
@@ -276,7 +276,7 @@ Your task is to merge them into ONE cohesive, professional research report.
 
 3. **DETAILED, SPECIFIC CONTENT**:
    - Include ALL specifics: named entities, exact numbers, dates, percentages, methodologies
-   - Use 4-6 sentences per paragraph MINIMUM
+   - Use 10 sentences per paragraph MINIMUM
    - Never use vague terms ("increased significantly") - use exact data with context
    - Example: Instead of "AI improves communication [1]" → "Research by Smith et al. (2023) found AI-powered translation tools increased cross-cultural communication efficiency by 47% among multinational teams, with technical documentation translation reaching 89% accuracy and real-time video interpretation 76% accuracy [1]"
 
