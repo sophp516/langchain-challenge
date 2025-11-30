@@ -3,7 +3,7 @@ import { X } from 'lucide-react'
 import './SettingsModal.css'
 
 export interface AgentConfig {
-  search_api: 'tavily'
+  search_api: 'tavily' | 'exa'
   max_search_results: number
   max_research_depth: number
   max_subtopics: number
@@ -75,7 +75,7 @@ export function SettingsModal({ isOpen, onClose, onSave, currentConfig }: Settin
               <label>Search API</label>
               <select
                 value={config.search_api}
-                style={{ opacity: 0.7 }}
+                onChange={(e) => setConfig({ ...config, search_api: e.target.value as 'tavily' | 'exa' })}
               >
                 <option value="tavily">Tavily</option>
                 <option value="exa">Exa</option>

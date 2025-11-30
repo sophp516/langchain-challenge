@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Literal
 from tavily import TavilyClient
-from perplexity import Perplexity
+from exa_py import Exa
 import os
 
 
@@ -81,4 +81,4 @@ exa_api_key = os.getenv("EXA_API_KEY")
 if not exa_api_key:
     raise ValueError("EXA_API_KEY environment variable is not set")
 
-exa_client = Perplexity(api_key=exa_api_key)
+exa_client = Exa(api_key=exa_api_key)
