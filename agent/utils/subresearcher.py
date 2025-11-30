@@ -3,16 +3,14 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
 from pydantic import create_model
 from utils.model import llm_quality
-from utils.configuration import tavily_client, exa_client
+from utils.configuration import tavily_client, exa_client, global_tavily_semaphore, global_exa_semaphore
 from utils.nodes.helpers import filter_quality_sources
 import asyncio
 from urllib.parse import urlparse
-import re
 
 
-# ============================================================================
-# STATE DEFINITION
-# ============================================================================
+
+
 
 class SubResearcherGraphState(TypedDict):
     # State for the subresearcher subgraph with iterative deepening
@@ -142,76 +140,93 @@ async def parallel_search_with_rate_limit(
 
     Args:
         queries: List of (query_string, metadata) tuples
-        search_api: "tavily" (for now)
+        search_api: "tavily" or "exa"
         max_results: Max results per query
         max_concurrent: Max concurrent searches (default 2 for rate limits)
 
     Returns:
         List of (query_string, results_list) tuples
     """
+    # Exa has stricter rate limits (5 req/sec), so reduce concurrency further
+    if search_api == "exa":
+        max_concurrent = 1  # Only 1 concurrent request for Exa
+
     semaphore = asyncio.Semaphore(max_concurrent)
 
     async def throttled_search(query: str, metadata: dict) -> tuple[str, list[dict], dict]:
-        """Execute a single search with rate limiting and retry logic"""
-        async with semaphore:
-            # Add delay before request to space out requests
-            await asyncio.sleep(1.5)  # Minimum 1.5s between requests
-            
-            max_retries = 3
-            retry_delay = 2.0
-            
-            for attempt in range(max_retries):
-                try:
-                    loop = asyncio.get_event_loop()
+        """Execute a single search with GLOBAL + LOCAL rate limiting and retry logic"""
+        # Truncate query to 400 characters (API limit)
+        original_query = query
+        if len(query) > 400:
+            # Try to cut at last space before 400 chars
+            truncated = query[:400]
+            last_space = truncated.rfind(' ')
+            if last_space > 320:  # If space is reasonably close to end (80% of 400)
+                query = truncated[:last_space].strip()
+            else:
+                query = truncated.strip()
+            print(f"    Query truncated from {len(original_query)} to {len(query)} chars")
 
-                    if search_api == "tavily": # TODO: Max depth increase -> rate limit issues
-                        search_results = await loop.run_in_executor(
-                            None,
-                            lambda: tavily_client.search(query=query, max_results=max_results, include_raw_content=True)
-                        )
-                        results_list = search_results.get("results", [])[:max_results]
+        # Select global semaphore based on API
+        global_sem = global_exa_semaphore if search_api == "exa" else global_tavily_semaphore
 
-                        # Additional delay after successful request
-                        await asyncio.sleep(0.5)
-                    elif search_api == "exa":
-                        search_results = await loop.run_in_executor(
-                            None,
-                            lambda: exa_client.search_and_contents(query, text=True, type="auto", num_results=max_results)
-                        )
-                        # Exa returns SearchResponse object with .results attribute
-                        results_list = [
-                            {
-                                "url": r.url,
-                                "title": r.title,
-                                "content": r.text,
-                                "score": r.score if hasattr(r, 'score') else 0.0
-                            }
-                            for r in search_results.results
-                        ][:max_results]
+        # Use both global (cross-subresearcher) and local (per-subresearcher) semaphores
+        async with global_sem:  # Global limit
+            async with semaphore:  # Then local
+                await asyncio.sleep(0.5 if search_api == "exa" else 0.4)
 
-                        await asyncio.sleep(0.5)
+                max_retries = 3
+                retry_delay = 2.0
 
+                for attempt in range(max_retries):
+                    try:
+                        loop = asyncio.get_event_loop()
 
-                    return (query, results_list, metadata)
+                        if search_api == "tavily":
+                            search_results = await loop.run_in_executor(
+                                None,
+                                lambda: tavily_client.search(query=query, max_results=max_results, include_raw_content=True)
+                            )
+                            results_list = search_results.get("results", [])[:max_results]
 
-                except Exception as e:
-                    error_str = str(e).lower()
-                    # Check if it's a rate limit error
-                    if "rate" in error_str or "excessive" in error_str or "blocked" in error_str:
-                        if attempt < max_retries - 1:
-                            wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
-                            print(f"    Rate limit hit for '{query[:60]}...', retrying in {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})")
-                            await asyncio.sleep(wait_time)
-                            continue
+                        elif search_api == "exa":
+                            search_results = await loop.run_in_executor(
+                                None,
+                                lambda: exa_client.search_and_contents(query, text=True, type="auto", num_results=max_results)
+                            )
+                            # Exa returns SearchResponse object with .results attribute
+                            results_list = [
+                                {
+                                    "url": r.url,
+                                    "title": r.title,
+                                    "content": r.text,
+                                    "score": r.score if hasattr(r, 'score') else 0.0
+                                }
+                                for r in search_results.results
+                            ][:max_results]
+
+                        # Success - return results
+                        return (query, results_list, metadata)
+
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        # Check if it's a rate limit error
+                        if "rate" in error_str or "excessive" in error_str or "blocked" in error_str:
+                            if attempt < max_retries - 1:
+                                wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                                print(f"    Rate limit hit for '{query[:60]}...', retrying in {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})")
+                                await asyncio.sleep(wait_time)
+                                continue
+                            else:
+                                print(f"    Search failed for '{query[:60]}...': {e} (max retries exceeded)")
+                                return (query, [], metadata)
                         else:
-                            print(f"    Search failed for '{query[:60]}...': {e} (max retries exceeded)")
+                            # Non-rate-limit error, don't retry
+                            print(f"    Search failed for '{query[:60]}...': {e}")
                             return (query, [], metadata)
-                    else:
-                        # Non-rate-limit error, don't retry
-                        print(f"    Search failed for '{query[:60]}...': {e}")
-                        return (query, [], metadata)
-            
-            return (query, [], metadata)
+
+                # If all retries exhausted
+                return (query, [], metadata)
 
     # Execute all searches in parallel with rate limiting
     tasks = [throttled_search(query, meta) for query, meta in queries]
@@ -226,7 +241,7 @@ async def parallel_search_with_rate_limit(
 
 async def _search_single_entity(entity: str, main_topic: str, search_api: str, max_results: int) -> list[dict]:
     """Execute a single entity search with rate limiting and error handling."""
-    query = f"{entity} {main_topic}"
+    query = entity
     await asyncio.sleep(1.5)  # Rate limiting
 
     try:
@@ -410,7 +425,7 @@ async def execute_research(state: SubResearcherGraphState) -> dict:
                 base_relevance = max(0.3, base_relevance - position_penalty)
 
                 # Use search API score if available, otherwise position-based
-                if search_score > 0:
+                if search_score is not None and search_score > 0:
                     relevance_scores[source_key] = search_score
                 else:
                     relevance_scores[source_key] = base_relevance - (result_idx * 0.05)
@@ -575,7 +590,7 @@ ANALYZE:
    - Test: Can you Google this exact phrase and find a Wikipedia page or official website? If YES → include. If NO → exclude.
    - PREFER FEWER HIGH-VALUE entities over many low-value ones
 
-3. **Knowledge Gaps**: Identify 1-3 HIGHLY SPECIFIC, ACTIONABLE search queries:
+3. **Knowledge Gaps**: Identify 1-3 HIGHLY SPECIFIC, ACTIONABLE search queries that are < 400 characters:
    - ONLY include gaps that address MISSING CRITICAL INFORMATION for the expected subtopics
    - Each gap must be:
      ✅ Specific enough to find targeted data (include year, location, organization names when relevant)
@@ -943,18 +958,14 @@ CRITICAL REQUIREMENTS:
    - Use bullet points or paragraphs as appropriate for readability
 
 4. **CITATION DISCIPLINE**:
-   - EVERY fact, statistic, claim, or piece of information MUST have a citation using the source IDs
-   - Use inline citations immediately after each fact: "X happened [src3]"
-   - Multiple sources for the same fact: "Y increased 15% [src2][src7][src12]"
-   - Every source ID from [src1] to [src{len(sorted_sources)}] should appear at least once
-   - If a source doesn't fit naturally, create an "Additional Findings" section
+   - Assign each source/url a single citation number in your tex
+   - End with ### Sources that lists each source with corresponding numbers
+   - IMPORTANT: Number sources sequentially without gaps (1,2,3,4...) in the final list regardless of which sources you choose
+   - Example format:
+      [1] Source Title: URL
+      [2] Source Title: URL
 
-5. **NO SOURCES SECTION YET**:
-   - Do NOT include a "## Sources" section in your output
-   - I will add the sources section separately with proper numbering
-   - Just use the [srcX] citations in your text
-
-6. **LENGTH EXPECTATION**:
+5. **LENGTH EXPECTATION**:
    - Report should be as long as it needs to be to cover all sources
    - Be thorough, not brief
 
@@ -974,50 +985,8 @@ Return the complete organized report with inline citations using [srcX] format.
 
         print(f"[SUMMARIZE] Generated comprehensive report for '{subtopic}' ({len(summarized_findings)} chars)")
 
-        # Remove consecutive duplicate citations like [src7][src7]
-        cleaned_findings = summarized_findings
-        cleaned_findings = re.sub(r'\[(src\d+)\](\[\1\])+', r'[\1]', cleaned_findings)
-        summarized_findings = cleaned_findings
-
-        # Extract which source IDs were actually cited
-        # Use the cleaned text to avoid counting duplicates
-        citation_matches = re.findall(r'\[src(\d+)\]', summarized_findings)
-        cited_src_ids = set(f"src{c}" for c in citation_matches if c.isdigit())
-
-        print(f"[SUMMARIZE] Found {len(cited_src_ids)} cited sources out of {len(sorted_sources)} available")
-
-        # Renumber citations sequentially and build sources list
-        # Map old src IDs to new sequential numbers
-        src_id_to_number = {}
-        number_to_source_key = {}
-        current_number = 1
-
-        # Assign numbers to cited sources in order of appearance
-        for src_id in sorted(cited_src_ids, key=lambda x: int(x.replace('src', ''))):
-            src_id_to_number[src_id] = current_number
-            source_key = id_to_source_key.get(src_id, "Unknown Source")
-            number_to_source_key[current_number] = source_key
-            current_number += 1
-
-        # Replace all [srcX] with [numbered] citations
-        final_report = summarized_findings
-        # Sort by src number descending to avoid replacing src1 before src10
-        for src_id in sorted(cited_src_ids, key=lambda x: int(x.replace('src', '')), reverse=True):
-            new_number = src_id_to_number[src_id]
-            final_report = re.sub(rf'\[{src_id}\]', f'[{new_number}]', final_report)
-
-        # Add Sources section with sequential numbering (ONLY cited sources)
-        final_report += "\n\n## Sources\n\n"
-        for number in sorted(number_to_source_key.keys()):
-            source_key = number_to_source_key[number]
-            final_report += f"[{number}] {source_key}\n"
-
-        print(f"[SUMMARIZE] ✓ Renumbered {len(cited_src_ids)} sources sequentially (1-{len(cited_src_ids)})")
-        print(f"[SUMMARIZE] ✓ Removed duplicate citations, only including {len(number_to_source_key)} actually cited sources")
-        print(f"[SUMMARIZE] {subtopic}: {final_report}")
-
         return {
-            "summarized_findings": final_report
+            "summarized_findings": summarized_findings
         }
 
     except Exception as e:
@@ -1025,11 +994,6 @@ Return the complete organized report with inline citations using [srcX] format.
         # Fallback: return all sources in a simple format
         fallback_summary = f"## Research Findings for {subtopic}\n\n"
         fallback_summary += f"Comprehensive findings from {len(research_results)} sources:\n\n"
-
-        for idx, (source_key, content) in enumerate(sorted_sources, start=1):
-            fallback_summary += f"### Source [{idx}]: {source_key[:150]}\n\n"
-            fallback_summary += f"{content}\n\n"
-
         fallback_summary += "## Sources\n\n"
         for idx, (source_key, _) in enumerate(sorted_sources, start=1):
             fallback_summary += f"[{idx}] {source_key}\n"

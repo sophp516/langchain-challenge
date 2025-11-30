@@ -6,19 +6,44 @@ import ReactMarkdown from 'react-markdown'
 import './MonitoringTab.css'
 
 /**
- * Convert reference format [1] Title (URL) to markdown links [1] [Title](URL)
+ * Make URLs in references clickable without changing the citation format.
+ * Only converts URLs to markdown links, preserving the original citation text.
  */
 function convertReferencesToLinks(content: string): string {
-  // Pattern: [number] Title (URL)
-  // Convert to: [number] [Title](URL)
-  const referencePattern = /\[(\d+)\]\s+([^(]+?)\s+\(([^)]+)\)/g
+  // Find all URLs and make them clickable
+  // Skip URLs that are already in markdown link format [text](url)
+  const urlPattern = /(https?:\/\/[^\s\)\n]+)/g
+  let lastIndex = 0
+  let result = ''
   
-  return content.replace(referencePattern, (_match, number, title, url) => {
-    // Trim whitespace from title
-    const trimmedTitle = title.trim()
-    // Return as markdown link
-    return `[${number}] [${trimmedTitle}](${url})`
-  })
+  let match
+  while ((match = urlPattern.exec(content)) !== null) {
+    const url = match[0]
+    const matchStart = match.index
+    const matchEnd = matchStart + url.length
+    
+    // Add text before the URL
+    result += content.substring(lastIndex, matchStart)
+    
+    // Check if URL is already part of a markdown link
+    const before = content.substring(Math.max(0, matchStart - 2), matchStart)
+    const after = content.substring(matchEnd, matchEnd + 1)
+    
+    // If URL is already in a markdown link (preceded by ]( or followed by )), don't convert
+    if (before === '](' || after === ')') {
+      result += url
+    } else {
+      // Make URL clickable
+      result += `[${url}](${url})`
+    }
+    
+    lastIndex = matchEnd
+  }
+  
+  // Add remaining text
+  result += content.substring(lastIndex)
+  
+  return result
 }
 
 function MonitoringTab() {
@@ -165,7 +190,15 @@ function MonitoringTab() {
                           <span className="message-role">{message.role === 'user' ? 'User' : 'Agent'}</span>
                         </div>
                         <div className="message-content">
-                          <ReactMarkdown>{convertReferencesToLinks(message.content)}</ReactMarkdown>
+                          <ReactMarkdown
+                            components={{
+                              a: ({ node, ...props }) => (
+                                <a {...props} target="_blank" rel="noopener noreferrer" />
+                              ),
+                            }}
+                          >
+                            {convertReferencesToLinks(message.content)}
+                          </ReactMarkdown>
                         </div>
                       </div>
                     ))}

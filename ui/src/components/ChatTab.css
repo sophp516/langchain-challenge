@@ -200,6 +200,7 @@
 .message-content a {
   color: #2563eb; /* Blue color for links */
   text-decoration: underline;
+  cursor: pointer;
 }
 
 .message.user .message-content a {

@@ -112,11 +112,11 @@ export function SettingsModal({ isOpen, onClose, onSave, currentConfig }: Settin
           <div className="settings-section">
             <h3>Clarification Settings</h3>
             <div className="settings-field">
-              <label>Max Clarification Rounds (0-10)</label>
+              <label>Max Clarification Rounds (0-7)</label>
               <input
                 type="number"
                 min="0"
-                max="10"
+                max="7"
                 value={config.max_clarification_rounds}
                 onChange={(e) => setConfig({ ...config, max_clarification_rounds: parseInt(e.target.value) || 0 })}
               />

@@ -27,16 +27,8 @@ async def check_user_intent(state: dict, config: RunnableConfig) -> dict:
         if isinstance(msg, (HumanMessage, AIMessage))
     ][-10:]  # Last 10 messages for context
 
-    # If no messages at all, default to new_research
-    if not conversation_messages:
-        return {"user_intent": "new_research"}
-
     # Get the latest user query for logging
-    latest_query = ""
-    for msg in reversed(conversation_messages):
-        if isinstance(msg, HumanMessage):
-            latest_query = msg.content
-            break
+    latest_query = messages[-1].content
 
     print(f"check_user_intent: analyzing query='{latest_query[:50]}...' with {len(conversation_messages)} messages of context")
 
@@ -58,7 +50,8 @@ async def check_user_intent(state: dict, config: RunnableConfig) -> dict:
 Classify into ONE category:
 
 1. "retrieve_report" - User wants to fetch/view a SPECIFIC report
-   Examples: "show me report abc123", "get report_xyz", "what's in report abc?"
+   Examples: "show me report abc123", "get report_xyz", "what's in report abc?", "fetch report abc123", "retrieve report xyz", "view report 123"
+   Keywords: fetch, get, show, view, retrieve, display, see, find + "report" + report_id
    Extract: report_id (required), version_id (optional - if user specifies "version 2" or "v3")
 
 2. "list_reports" - User wants to see available reports or versions
@@ -97,6 +90,7 @@ DEFAULTS:
 
     # Validate intent
     valid_intents = ["retrieve_report", "list_reports", "revise_report", "new_research"]
+    print(f"check_user_intent: intent={intent}")
     if intent not in valid_intents:
         intent = "new_research"
 
@@ -106,7 +100,7 @@ DEFAULTS:
         "user_intent": intent,
         "intent_report_id": report_id,
         "intent_version_id": version_id,
-        "intent_feedback": feedback
+        "feedback": feedback
     }
 
 
@@ -129,7 +123,8 @@ async def check_initial_context(state: dict, config: RunnableConfig) -> dict:
     if agent_config.max_clarification_rounds == 0:
         print("check_initial_context: clarification disabled, proceeding to research")
         return {
-            "is_finalized": True
+            "is_finalized": True,
+            "messages": [HumanMessage(content=f"Thank you. I will now start research on topic: {topic.strip()}")]
         }
 
     # If we've asked too many questions, finalize with what we have
@@ -141,14 +136,16 @@ async def check_initial_context(state: dict, config: RunnableConfig) -> dict:
         return {
             "is_finalized": True,
             "topic": finalized_topic.strip(),
-            "clarification_rounds": clarification_rounds
+            "clarification_rounds": clarification_rounds,
+            "messages": [HumanMessage(content=f"Thank you. I will now start research on topic: {finalized_topic.strip()}")]
         }
 
     if not topic or len(topic.strip()) == 0:
         print("check_initial_context: no topic found, returning is_finalized=False")
         return {
             "is_finalized": False,
-            "pending_clarification_question": "What would you like to research?"
+            "pending_clarification_question": "What would you like to research?",
+            "messages": [AIMessage(content="What would you like to research?")]
         }
 
     # Build context with all Q&A so far
@@ -229,7 +226,6 @@ async def check_initial_context(state: dict, config: RunnableConfig) -> dict:
         return {
             "is_finalized": True,
             "topic": finalized_topic.strip(),
-            "messages": [HumanMessage(content=f"Thank you. I will now start research on topic: {finalized_topic}")]
         }
 
     # Not sufficient - store the pre-generated question for generate_clarification to use
@@ -237,14 +233,15 @@ async def check_initial_context(state: dict, config: RunnableConfig) -> dict:
         print(f"check_initial_context: generated question='{question[:100]}...'")
         return {
             "is_finalized": False,
-            "pending_clarification_question": question  # Store for next node to add to messages
+            "pending_clarification_question": question,  # Store for next node to add to messages
         }
 
     # Fallback: if no question generated but marked insufficient, finalize anyway
     print("check_initial_context: marked insufficient but no question generated, finalizing")
     return {
         "is_finalized": True,
-        "topic": topic.strip()
+        "topic": topic.strip(),
+        "messages": [HumanMessage(content=f"Thank you. I will now start research on topic: {topic.strip()}")]
     }
 
 

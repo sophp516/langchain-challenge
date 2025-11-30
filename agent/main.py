@@ -8,26 +8,33 @@ async def chat():
     agent = create_agent(use_checkpointer=True)
     agent.get_graph().print_ascii()
 
-    thread_counter = 0
+    # Use a single thread for the entire conversation session
+    config = {"configurable": {"thread_id": "chat_session_1"}}
 
     while True:
         user_input = input("User: ")
         if user_input.lower() in ["exit", "quit", "bye"]:
             break
 
-        # New thread for each conversation
-        thread_counter += 1
-        config = {"configurable": {"thread_id": str(thread_counter)}}
-
         # Initialize state with user's topic
-        state = {
-            "topic": user_input,
-            "messages": [HumanMessage(content=user_input)],
-            "is_finalized": False,
-            "clarification_rounds": 0,
-            "clarification_questions": [],
-            "user_responses": []
-        }
+        # For first message, initialize full state. For subsequent messages, just pass the new message
+        graph_state = agent.get_state(config)
+
+        if graph_state.values:
+            # Conversation already exists - just add new message
+            state = {
+                "messages": [HumanMessage(content=user_input)],
+            }
+        else:
+            # First message - initialize full state
+            state = {
+                "topic": user_input,
+                "messages": [HumanMessage(content=user_input)],
+                "is_finalized": False,
+                "clarification_rounds": 0,
+                "clarification_questions": [],
+                "user_responses": []
+            }
 
         # Initial invocation
         result = await agent.ainvoke(state, config)

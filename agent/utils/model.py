@@ -17,7 +17,7 @@ llm = ChatOpenAI(
 
 # Quality LLM for complex tasks (writing, extraction, planning)
 llm_quality = ChatOpenAI(
-    model="gpt-5o",
+    model="gpt-5.1",
     api_key=openai_api_key,
 )
 

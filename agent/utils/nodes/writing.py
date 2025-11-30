@@ -178,7 +178,6 @@ Examples:
     print(f"\nTotal sources gathered: {total_sources}\n")
 
     # Update subtopics with researched subtopic names for write_full_report
-    # Each subtopic dict now has a "subtopics" field containing the actual researched subtopic name
     for idx, subtopic_dict in enumerate(subtopics):
         subtopic_dict["subtopics"] = [sub_researchers[idx].get("subtopic", "")]
 
@@ -188,19 +187,18 @@ Examples:
     }
 
     return {
-        "messages": [AIMessage(content=f"Generated research plan with {len(subtopics)} subtopics and gathered {total_sources} sources")],
+        "messages": [AIMessage(content=f"Finished research on {len(subtopics)} subtopics and gathered {total_sources} sources. Generating report now...")],
         "research_outline": outline,
         "sub_researchers": sub_researchers,
     }
 
 
-# TODO: Fix tendency of creating too many sections
+
 async def write_full_report(state: dict, config: RunnableConfig) -> dict:
     """
     Write the entire report in ONE LLM call for maximum coherence and efficiency.
     Uses all research results and outline to generate a comprehensive, well-structured report.
     """
-    agent_config = get_config_from_configurable(config.get("configurable", {}))
 
     topic = state.get("topic", "")
     outline = state.get("report_outline", {})
@@ -213,7 +211,6 @@ async def write_full_report(state: dict, config: RunnableConfig) -> dict:
 
     all_summarized_findings = ""
     total_reports = 0
-    all_sources_dict = {}  # Maps citation_number -> source_key
 
     for researcher in sub_researchers:
         subtopic = researcher.get("subtopic", "")
@@ -222,14 +219,6 @@ async def write_full_report(state: dict, config: RunnableConfig) -> dict:
         if not summarized_findings:
             print(f"write_full_report: WARNING - No summarized findings for '{subtopic}'!")
             continue
-
-        # Extract sources from this researcher's "## Sources" section
-        if "## Sources" in summarized_findings:
-            sources_section = summarized_findings.split("## Sources")[-1]
-            source_lines = re.findall(r'\[(\d+)\]\s*(.+)', sources_section)
-            for source_num_str, source_key in source_lines:
-                source_num = int(source_num_str)
-                all_sources_dict[source_num] = source_key.strip()
 
         all_summarized_findings += f"\n\n{'='*60}\n"
         all_summarized_findings += f"RESEARCH FOR: {subtopic}\n"
@@ -240,7 +229,6 @@ async def write_full_report(state: dict, config: RunnableConfig) -> dict:
 
     print(f"write_full_report: Compiled {total_reports} summarized research reports")
     print(f"write_full_report: Total context length: {len(all_summarized_findings)} characters")
-    print(f"write_full_report: Total unique sources available: {len(all_sources_dict)}")
 
     # Generate report with structured output for title and sources
     report_with_title_model = create_model(
@@ -266,15 +254,19 @@ Match the topic's language EXACTLY. This is MANDATORY.
 
 **CRITICAL REQUIREMENTS:**
 
-1. **SOURCE FIDELITY & CITATION DISCIPLINE**:
+1. **SOURCE FIDELITY & CITATION DISCIPLINE***:
    - ONLY use information EXPLICITLY in the sources above - NO general knowledge
    - EVERY factual sentence MUST end with citations [1], [2], etc.
-   - ONLY cite sources whose specific content appears in your text
-   - Use multiple sources per key point: "X happened [3][7][12]"
-   - Target 5-8 citations per paragraph minimum
+   - Assign each source/url a single citation number in your tex
+   - End with ### Sources that lists each source with corresponding numbers
+   - IMPORTANT: Number sources sequentially without gaps (1,2,3,4...) in the final list regardless of which sources you choose
+   - Example format:
+      [1] Source Title: URL
+      [2] Source Title: URL
 
 2. **COMPREHENSIVE EXPANSION (NOT SUMMARY)**:
    - This is a FULL RESEARCH REPORT - EXPAND the subtopic reports, don't condense
+   - Feel free to combine research for different subtopics
    - Each major section (##): 600-1000 words MINIMUM (strictly enforce)
    - Each subsection (###): 200-300 words
    - Final report should be LONGER than combined inputs
@@ -310,55 +302,9 @@ CRITICAL: Only cite sources you actually used in the text.
     report_content = response.content
     report_title = response.report_title
 
-    print(f"write_full_report: generated report with title='{report_title}'")
+    print(f"write_full_report: generated report with title='{report_title}' ({len(report_content)} chars)")
 
-    # IMPORTANT: Use regex extraction from actual report content instead of structured output
-    # The structured output may include sources that aren't actually in the text
-    citations_in_content = re.findall(r'\[(\d+)\]', report_content)
-    unique_citations = sorted(set(int(c) for c in citations_in_content if c.isdigit()))
-
-    citation_count = len(unique_citations)
-
-    # Remove consecutive duplicate citations like [7][7]
-    cleaned_content = report_content
-    # Find patterns like [X][X] and replace with [X]
-    cleaned_content = re.sub(r'\[(\d+)\](\[\1\])+', r'[\1]', cleaned_content)
-    report_content = cleaned_content
-
-    print(f"write_full_report: Citations from structured output: {unique_citations[:20]}...")  # Show first 20
-    print(f"write_full_report: Number of citations in report: {citation_count}")
-
-    # RENUMBER SEQUENTIALLY: Map cited source numbers to sequential numbers (1,2,3...)
-    old_to_new_number = {}
-    new_to_source_key = {}
-    sequential_number = 1
-
-    for old_number in unique_citations:
-        if old_number in all_sources_dict:
-            old_to_new_number[old_number] = sequential_number
-            new_to_source_key[sequential_number] = all_sources_dict[old_number]
-            sequential_number += 1
-        else:
-            print(f"write_full_report: WARNING - Citation [{old_number}] not found in sources!")
-
-    # Replace all citations in the report with sequential numbers
-    renumbered_content = report_content
-    # Sort by old number descending to avoid replacing [1] before [10]
-    for old_num in sorted(old_to_new_number.keys(), reverse=True):
-        new_num = old_to_new_number[old_num]
-        renumbered_content = re.sub(rf'\[{old_num}\]', f'[{new_num}]', renumbered_content)
-
-    # Build references section with sequential numbering
-    full_report = f"# {report_title}\n\n{renumbered_content}\n\n"
-    full_report += "## References\n\n"
-
-    for seq_num in sorted(new_to_source_key.keys()):
-        source_key = new_to_source_key[seq_num]
-        # Format source as markdown link
-        formatted_source = format_source_as_markdown_link(source_key)
-        full_report += f"[{seq_num}] {formatted_source}\n"
-
-    print(f"write_full_report: ✓ Renumbered {len(new_to_source_key)} sources sequentially (1-{len(new_to_source_key)})")
+    full_report = f"# {report_title}\n\n{report_content}"
 
     full_report_message = AIMessage(content=full_report)
 

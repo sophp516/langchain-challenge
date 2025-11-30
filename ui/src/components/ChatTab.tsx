@@ -6,6 +6,47 @@ import { createThread as createThreadInDb, appendMessage } from '../services/db'
 import type { AgentConfig } from './SettingsModal'
 import './ChatTab.css'
 
+/**
+ * Make URLs in references clickable without changing the citation format.
+ * Only converts URLs to markdown links, preserving the original citation text.
+ */
+function convertReferencesToLinks(content: string): string {
+  // Find all URLs and make them clickable
+  // Skip URLs that are already in markdown link format [text](url)
+  const urlPattern = /(https?:\/\/[^\s\)\n]+)/g
+  let lastIndex = 0
+  let result = ''
+  
+  let match
+  while ((match = urlPattern.exec(content)) !== null) {
+    const url = match[0]
+    const matchStart = match.index
+    const matchEnd = matchStart + url.length
+    
+    // Add text before the URL
+    result += content.substring(lastIndex, matchStart)
+    
+    // Check if URL is already part of a markdown link
+    const before = content.substring(Math.max(0, matchStart - 2), matchStart)
+    const after = content.substring(matchEnd, matchEnd + 1)
+    
+    // If URL is already in a markdown link (preceded by ]( or followed by )), don't convert
+    if (before === '](' || after === ')') {
+      result += url
+    } else {
+      // Make URL clickable
+      result += `[${url}](${url})`
+    }
+    
+    lastIndex = matchEnd
+  }
+  
+  // Add remaining text
+  result += content.substring(lastIndex)
+  
+  return result
+}
+
 interface Message {
   id: string
   role: 'user' | 'assistant'
@@ -14,7 +55,6 @@ interface Message {
 }
 
 
-// Lazy initialization - only create client when needed
 let client: Client | null = null
 const getClient = () => {
   const apiUrl = import.meta.env.VITE_API_URL
@@ -149,7 +189,7 @@ function ChatTab({ agentConfig }: ChatTabProps) {
         // Start new run
         const input = {
           topic: userInput,
-          messages: [],
+          messages: [{ type: 'human', content: userInput }],
           is_finalized: false,
           clarification_rounds: 0,
           clarification_questions: [],
@@ -300,7 +340,15 @@ function ChatTab({ agentConfig }: ChatTabProps) {
             </div>
             <div className="message-content">
               {message.content ? (
-                <ReactMarkdown>{message.content}</ReactMarkdown>
+                <ReactMarkdown
+                  components={{
+                    a: ({ node, ...props }) => (
+                      <a {...props} target="_blank" rel="noopener noreferrer" />
+                    ),
+                  }}
+                >
+                  {convertReferencesToLinks(message.content)}
+                </ReactMarkdown>
               ) : (
                 <div className="loading">
                   <div className="typing-indicator">

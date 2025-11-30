@@ -3,6 +3,7 @@ from typing import Literal
 from tavily import TavilyClient
 from exa_py import Exa
 import os
+import asyncio
 
 
 
@@ -23,9 +24,9 @@ class AgentConfig(BaseModel):
     )
 
     max_search_results: int = Field(
-        default=7,
+        default=5,
         ge=1,
-        le=20,
+        le=7,
         description="Maximum number of search results per query"
     )
 
@@ -75,3 +76,14 @@ if not exa_api_key:
     raise ValueError("EXA_API_KEY environment variable is not set")
 
 exa_client = Exa(api_key=exa_api_key)
+
+
+# Rate limiters
+
+# Tavily: Conservative limit to prevent "excessive requests" errors
+# Even though Tavily claims ~10 req/sec, in practice we need to be more conservative
+global_tavily_semaphore = asyncio.Semaphore(4)
+
+# Exa: Strict limit (5 req/sec)
+# With 7 subresearchers running in parallel, limit to 2 concurrent to stay under 5 req/sec
+global_exa_semaphore = asyncio.Semaphore(2)

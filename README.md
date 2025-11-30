@@ -27,90 +27,110 @@ A deep research agent built with LangGraph that accepts user queries and generat
   - OpenAI API key (for LLM)
   - Optional Gemini API key to activate evaluation features
 
-## Setup
+## Running the Project
 
-### 1. Agent Setup
+There are two ways to run the project: **Development Mode** (local) or **Docker Compose** (containerized).
 
-```bash
-cd agent
+### Option 1: Development Mode
 
-# Install dependencies
-pip install -r requirements.txt
+This mode runs each service locally. It provides the option to run the agent directly through the terminal or the development mode UI.
 
-# Create .env file
-cp .env.example .env
-# Edit .env and add:
-# - TAVILY_API_KEY=your_key
-# - EXA_API_KEY=your_key (optional)
-# - OPENAI_API_KEY=your_key
-# - MONGODB_URI=my_mongodb_connection_string
-```
+#### Setup
 
-### 2. Backend Setup
-
-```bash
-cd backend
-
-# Install dependencies
-npm install
-
-# Create .env file
-echo "MONGODB_URI=your_mongodb_connection_string" > .env
-echo "PORT=3001" >> .env
-
-# Start backend server
-npm start
-```
-
-### 3. UI Setup
-
-```bash
-cd ui
-
-# Install dependencies
-npm install
-
-# Create .env file
-echo "VITE_API_URL=http://localhost:8000" > .env
-
-# Start development server
-npm run dev
-```
-
-### 4. Start LangGraph Server
-
-```bash
-cd agent
-
-# Start LangGraph server (exposes agent as API)
-langgraph dev
-```
-
-The LangGraph server will run on `http://localhost:8000` by default.
-
-## Running Locally
-
-1. **Start MongoDB** (if using local instance):
+1. **Agent Setup**:
    ```bash
-   mongod
+   cd agent
+   pip install -r requirements.txt
+   cp .env.example .env
+   # Edit .env and add your API keys:
+   # - TAVILY_API_KEY=your_key
+   # - EXA_API_KEY=your_key (optional)
+   # - OPENAI_API_KEY=your_key
+   # - MONGODB_URI=your_mongodb_connection_string
    ```
 
-2. **Start Backend** (in `backend/` directory):
+2. **Backend Setup**:
    ```bash
+   cd backend
+   npm install
+   echo "MONGODB_URI=your_mongodb_connection_string" > .env
+   echo "PORT=3001" >> .env
+   ```
+
+3. **UI Setup**:
+   ```bash
+   cd ui
+   npm install
+   echo "VITE_API_URL=http://localhost:8000" > .env
+   ```
+
+#### Running
+
+Start each service in separate terminals:
+
+1. **Start Backend** (Terminal 1):
+   ```bash
+   cd backend
    npm start
    ```
 
-3. **Start LangGraph Server** (in `agent/` directory):
+2. **Start LangGraph Server** (Terminal 2):
    ```bash
+   cd agent
    langgraph dev
    ```
+   Runs on `http://localhost:8000` by default.
 
-4. **Start UI** (in `ui/` directory):
+3. **Start UI** (Terminal 3):
    ```bash
+   cd ui
    npm run dev
    ```
+   Runs on `http://localhost:5173` by default.
 
-5. **Open Browser**: Navigate to `http://localhost:5173`
+4. **Open Browser**: Navigate to `http://localhost:5173`
+
+### Option 2: Docker Compose
+
+This mode runs all services in containers using Docker Compose.
+
+#### Prerequisites
+- Docker and Docker Compose installed
+- All API keys and MongoDB URI configured
+
+#### Setup
+
+1. **Create `.env` file in `agent/` directory**:
+   ```bash
+   cd agent
+   cp .env.example .env
+   # Edit .env with your API keys and MongoDB URI
+   ```
+
+2. **Start all services**:
+   ```bash
+   cd agent
+   docker-compose up
+   ```
+
+   Or run in detached mode:
+   ```bash
+   docker-compose up -d
+   ```
+
+#### Services
+
+- **Backend**: `http://localhost:3001`
+- **Agent (LangGraph)**: `http://localhost:2024`
+- **UI**: `http://localhost:5173`
+
+#### Docker Compose Commands
+
+```bash
+cd agent
+# Start services
+docker-compose up
+```
 
 ## Usage
 
@@ -118,7 +138,7 @@ The LangGraph server will run on `http://localhost:8000` by default.
 2. The agent will:
    - Generate a research plan with subtopics
    - Execute parallel searches for each subtopic
-   - Assess coverage and perform iterative deepening
+   - Assess coverage and perform adaptive deepening research
    - Generate a comprehensive report with citations
 3. View reports in the chat or retrieve them later using report IDs
 
@@ -132,9 +152,6 @@ Click the settings icon in the UI to configure:
 - Clarification rounds
 - Source credibility thresholds
 
-## Docker (Optional)
-
-Each component has a Dockerfile. Use `docker-compose.yml` in the `agent/` directory for containerized deployment.
 
 ## Project Structure
 
@@ -155,16 +172,6 @@ langchain-challenge/
         └── components/
 ```
 
-## API Endpoints
-
-### LangGraph API (via `langgraph dev`)
-- `POST /threads` - Create thread
-- `POST /threads/{thread_id}/runs/stream` - Stream agent execution
-
-### Backend API
-- `GET /api/threads` - List all threads
-- `GET /api/threads/:threadId/messages` - Get thread messages
-- `POST /api/threads/:threadId/messages` - Save messages
 
 ## Troubleshooting
 
@@ -172,8 +179,3 @@ langchain-challenge/
 - **API Keys**: Verify all API keys are in `.env` files
 - **Port Conflicts**: Default ports are 8000 (LangGraph), 3001 (Backend), 5173 (UI)
 - **Rate Limits**: The agent includes rate limiting for search APIs
-
-## License
-
-MIT
-
