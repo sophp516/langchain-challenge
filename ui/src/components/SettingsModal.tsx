@@ -8,10 +8,8 @@ export interface AgentConfig {
   max_research_depth: number
   max_subtopics: number
   max_clarification_rounds: number
-  max_revision_rounds: number
   min_credibility_score: number
   // UI-only fields (not in backend config)
-  min_report_score?: number
   enable_user_feedback?: boolean
   enable_cross_verification?: boolean
 }
@@ -22,10 +20,8 @@ const defaultConfig: AgentConfig = {
   max_research_depth: 3,
   max_subtopics: 7,
   max_clarification_rounds: 0,
-  max_revision_rounds: 1,
   min_credibility_score: 0.3,
   // UI-only defaults
-  min_report_score: 85,
   enable_user_feedback: true,
   enable_cross_verification: false
 }
@@ -129,31 +125,6 @@ export function SettingsModal({ isOpen, onClose, onSave, currentConfig }: Settin
                 max="10"
                 value={config.max_clarification_rounds}
                 onChange={(e) => setConfig({ ...config, max_clarification_rounds: parseInt(e.target.value) || 0 })}
-              />
-            </div>
-          </div>
-
-          {/* Report Quality Settings */}
-          <div className="settings-section">
-            <h3>Report Quality Settings</h3>
-            <div className="settings-field">
-              <label>Min Report Score (0-100)</label>
-              <input
-                type="number"
-                min="0"
-                max="100"
-                value={config.min_report_score}
-                onChange={(e) => setConfig({ ...config, min_report_score: parseInt(e.target.value) || 85 })}
-              />
-            </div>
-            <div className="settings-field">
-              <label>Max Revision Rounds (0-5)</label>
-              <input
-                type="number"
-                min="0"
-                max="5"
-                value={config.max_revision_rounds}
-                onChange={(e) => setConfig({ ...config, max_revision_rounds: parseInt(e.target.value) || 1 })}
               />
             </div>
           </div>

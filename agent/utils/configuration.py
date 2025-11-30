@@ -44,13 +44,6 @@ class AgentConfig(BaseModel):
         description="Maximum number of clarification questions (0-10)"
     )
 
-    max_revision_rounds: int = Field(
-        default=1,
-        ge=0,
-        le=5,
-        description="Maximum number of report revision attempt"
-    )
-
     min_credibility_score: float = Field(
         default=0.3,
         ge=0.0,

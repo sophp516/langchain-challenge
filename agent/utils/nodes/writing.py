@@ -166,7 +166,7 @@ Examples:
     sub_researchers = await asyncio.gather(*tasks)
 
     print(f"\n{'='*60}")
-    print(f"COMBINED NODE: Completed research for {len(sub_researchers)} subtopics")
+    print(f"WRITER: Completed research for {len(sub_researchers)} subtopics")
     print(f"{'='*60}")
 
     total_sources = 0
@@ -250,8 +250,14 @@ async def write_full_report(state: dict, config: RunnableConfig) -> dict:
     )
 
     report_prompt = f"""
-Based on all the research conducted, create a comprehensive, cohesive, professional research report that answers the main topic. 
+Based on all the research conducted, create a comprehensive, cohesive, professional research report that answers the main topic.
 Provide a balanced, thorough analysis. Be as comprehensive as possible, and include all information that is relevant to the overall research question. People are using you for deep research and will expect detailed, comprehensive answers.
+
+**CRITICAL: LANGUAGE REQUIREMENT**
+The main topic below is written in a specific language. You MUST write your ENTIRE report in the SAME language as the main topic.
+If the topic is in Chinese (中文), write the entire report in Chinese.
+If the topic is in English, write the entire report in English.
+Match the topic's language EXACTLY. This is MANDATORY.
 
 **MAIN TOPIC**: {topic}
 

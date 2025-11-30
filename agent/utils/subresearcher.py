@@ -176,9 +176,18 @@ async def parallel_search_with_rate_limit(
                     elif search_api == "exa":
                         search_results = await loop.run_in_executor(
                             None,
-                            lambda: exa_client.search_and_contents(query, text=True, type = "auto")
+                            lambda: exa_client.search_and_contents(query, text=True, type="auto", num_results=max_results)
                         )
-                        results_list = search_results.get("results", [])[:max_results]
+                        # Exa returns SearchResponse object with .results attribute
+                        results_list = [
+                            {
+                                "url": r.url,
+                                "title": r.title,
+                                "content": r.text,
+                                "score": r.score if hasattr(r, 'score') else 0.0
+                            }
+                            for r in search_results.results
+                        ][:max_results]
 
                         await asyncio.sleep(0.5)
 
@@ -234,10 +243,19 @@ async def _search_single_entity(entity: str, main_topic: str, search_api: str, m
         elif search_api == "exa":
             results = await loop.run_in_executor(
                 None,
-                lambda: exa_client.search_and_contents(query, text=True, type="auto")
+                lambda: exa_client.search_and_contents(query, text=True, type="auto", num_results=max_results)
             )
             await asyncio.sleep(0.5)
-            return results.get("results", [])[:max_results]
+            # Exa returns SearchResponse object with .results attribute
+            return [
+                {
+                    "url": r.url,
+                    "title": r.title,
+                    "content": r.text,
+                    "score": r.score if hasattr(r, 'score') else 0.0
+                }
+                for r in results.results
+            ][:max_results]
 
     except Exception as e:
         error_str = str(e).lower()
@@ -838,10 +856,8 @@ async def assess_quality(state: SubResearcherGraphState) -> dict:
     }
 
 
-async def summarize_findings(state: SubResearcherGraphState) -> dict:
+async def synthesize_findings(state: SubResearcherGraphState) -> dict:
     """
-    NEW FINAL NODE: Synthesize research findings into a COMPREHENSIVE, organized report.
-
     CRITICAL REQUIREMENTS:
     1. Include ALL information from ALL sources (nothing should be lost)
     2. Organize information thematically for better readability
@@ -893,6 +909,12 @@ async def summarize_findings(state: SubResearcherGraphState) -> dict:
     # Create comprehensive summarization prompt
     summarization_prompt = f"""You are a research synthesis specialist. Create a COMPREHENSIVE, organized report from ALL research findings.
 
+**CRITICAL: LANGUAGE REQUIREMENT**
+The main topic below is written in a specific language. You MUST write your ENTIRE report in the SAME language as the main topic.
+If the topic is in Chinese (中文), write the entire report in Chinese.
+If the topic is in English, write the entire report in English.
+Match the topic's language EXACTLY. This is MANDATORY.
+
 MAIN TOPIC: {main_topic}
 SUBTOPIC: {subtopic}
 
@@ -904,7 +926,7 @@ CRITICAL REQUIREMENTS:
 1. **COMPREHENSIVE COVERAGE - USE ALL SOURCES**:
    - You MUST incorporate information from ALL {len(sorted_sources)} sources
    - Do NOT summarize or condense - EXPAND and organize
-   - Include ALL specific data, statistics, examples, and details from every source
+   - Include ALL data, statistics, examples, and details from every source (Every number from the search result should be kept)
    - Repeat key information verbatim from sources when important
    - This report should be LONGER than the raw sources, not shorter
    
@@ -933,8 +955,7 @@ CRITICAL REQUIREMENTS:
    - Just use the [srcX] citations in your text
 
 6. **LENGTH EXPECTATION**:
-   - Target length: 800-2000 words (or more if needed to cover all sources)
-   - Each major section: 200-400 words minimum
+   - Report should be as long as it needs to be to cover all sources
    - Be thorough, not brief
 
 REMEMBER: A later LLM will merge this with other subtopic reports, so having ALL sources and ALL information is CRITICAL. Don't lose anything!
@@ -1071,7 +1092,7 @@ def create_subresearcher_graph():
     workflow.add_node("assess_coverage", assess_coverage_and_gaps)
     workflow.add_node("deep_dive", deep_dive_research)
     workflow.add_node("assess_quality", assess_quality)
-    workflow.add_node("summarize", summarize_findings)
+    workflow.add_node("synthesize", synthesize_findings)
 
     # Unified research flow - start directly with execution
     workflow.set_entry_point("research")
@@ -1091,8 +1112,8 @@ def create_subresearcher_graph():
     workflow.add_edge("deep_dive", "assess_coverage")
 
     # After quality assessment, summarize findings
-    workflow.add_edge("assess_quality", "summarize")
-    workflow.add_edge("summarize", END)
+    workflow.add_edge("assess_quality", "synthesize")
+    workflow.add_edge("synthesize", END)
 
     return workflow.compile()
 
