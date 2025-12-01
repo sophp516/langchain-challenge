@@ -15,13 +15,10 @@ async def call_report_tools(state: dict) -> dict:
     """
     intent = state.get("user_intent", "")
     report_id = state.get("intent_report_id", "")
-    topic = state.get("topic", "")
 
     print(f"call_report_tools: intent={intent}, report_id={report_id}")
 
     # Create tool call directly based on intent (no LLM needed!)
-    tool_calls = []
-
     if intent == "retrieve_report":
         if not report_id:
             # No report_id provided, ask user
@@ -120,25 +117,22 @@ async def execute_and_format_tools(state: dict) -> dict:
         return {**tool_result, "messages": merged_state["messages"] + [AIMessage(content="No results found.")]}
 
     # Format based on result type
-    # Track state updates separately
     state_updates = {}
 
     if isinstance(tool_result_data, dict):
         if tool_result_data.get("error"):
             response_text = f"Error: {tool_result_data['error']}"
         elif tool_result_data.get("success") and tool_result_data.get("content"):
-            # Handle revise_report response
             report_id = tool_result_data.get('report_id', 'Unknown')
             version_id = tool_result_data.get('version_id', 'N/A')
             previous_version = tool_result_data.get('previous_version', 'N/A')
             content = tool_result_data.get('content', 'No content available')
 
-            # Update state with revised report content
             state_updates["report_content"] = content
             state_updates["report_id"] = report_id
             state_updates["version_id"] = version_id
 
-            response_text = f"""## ✏️ Revised Report: {report_id}
+            response_text = f"""## Revised Report: {report_id}
 
 **New Version:** {version_id} (revised from version {previous_version})
 
@@ -146,18 +140,16 @@ async def execute_and_format_tools(state: dict) -> dict:
 
 {content}"""
         elif tool_result_data.get("found") and tool_result_data.get("content"):
-            # Format report with better visual hierarchy (get_report response)
             report_id = tool_result_data.get('report_id', 'Unknown')
             version_id = tool_result_data.get('version_id', 'N/A')
             created_at = tool_result_data.get('created_at', 'Unknown date')
             content = tool_result_data.get('content', 'No content available')
 
-            # Update state with fetched report content
             state_updates["report_content"] = content
             state_updates["report_id"] = report_id
             state_updates["version_id"] = version_id
 
-            response_text = f"""## 📄 Report: {report_id}
+            response_text = f"""## Report: {report_id}
 
 **Version:** {version_id}
 **Created:** {created_at}
@@ -172,7 +164,7 @@ async def execute_and_format_tools(state: dict) -> dict:
                 f"### Version {v['version_id']}\n**Created:** {v['created_at']}\n\n{v.get('content_preview', 'No preview available')}"
                 for v in versions
             ])
-            response_text = f"""## 📋 Versions of Report: {report_id}
+            response_text = f"""## Versions of Report: {report_id}
 
 {versions_text}"""
         elif tool_result_data.get("reports"):
@@ -182,7 +174,7 @@ async def execute_and_format_tools(state: dict) -> dict:
                 f"- **{r['report_id']}** | Version: {r['latest_version']} | Created: {r['created_at']}"
                 for r in reports
             ])
-            response_text = f"""## 📚 Available Reports ({total_reports})
+            response_text = f"""## Available Reports ({total_reports})
 
 {reports_text}"""
         elif tool_result_data.get("found") == False:
@@ -194,7 +186,7 @@ async def execute_and_format_tools(state: dict) -> dict:
 
     print(f"execute_and_format_tools: executed tools and formatted response")
 
-    # Return with state updates if any
+
     return {
         **tool_result,
         **state_updates,  # Include state updates (report_content, report_id, version_id)

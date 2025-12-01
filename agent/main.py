@@ -1,32 +1,40 @@
 from deep_researcher import create_agent
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
-import asyncio
+import asyncio, uuid
 
 async def chat():
-    # Create agent with checkpointer for interrupt/resume support
+    # Need checkpointer for interrupt/resume support
     agent = create_agent(use_checkpointer=True)
     agent.get_graph().print_ascii()
 
-    # Use a single thread for the entire conversation session
-    config = {"configurable": {"thread_id": "chat_session_1"}}
+    config = {
+        "configurable": {
+            "thread_id": str(uuid.uuid4()),
+            # Add agent configuration here
+            # "max_clarification_rounds": 2,
+            # "max_subtopics": 7,
+            # "max_search_results": 5,
+            # "max_research_depth": 5,
+            # "search_api": "tavily",
+            # "min_credibility_score": 0.3,
+        }
+    }
 
     while True:
         user_input = input("User: ")
         if user_input.lower() in ["exit", "quit", "bye"]:
             break
 
-        # Initialize state with user's topic
-        # For first message, initialize full state. For subsequent messages, just pass the new message
         graph_state = agent.get_state(config)
 
         if graph_state.values:
-            # Conversation already exists - just add new message
+            # Conversation already exists 
             state = {
                 "messages": [HumanMessage(content=user_input)],
             }
         else:
-            # First message - initialize full state
+            # First message -> Initialize full state
             state = {
                 "topic": user_input,
                 "messages": [HumanMessage(content=user_input)],
@@ -36,7 +44,6 @@ async def chat():
                 "user_responses": []
             }
 
-        # Initial invocation
         result = await agent.ainvoke(state, config)
 
         # Handle interrupt/resume loop
@@ -45,7 +52,7 @@ async def chat():
             next_nodes = graph_state.next
 
             if not next_nodes:
-                # Graph completed, show final result
+                # Show final result
                 if "messages" in result and result["messages"]:
                     final_message = result["messages"][-1]
                     if hasattr(final_message, 'content'):

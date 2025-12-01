@@ -38,7 +38,6 @@ async def save_report(
         full_report: str,
         report_title: str = None,
         search_results: str = None,
-        report_sections: list = None
 ):
     """
     Save report with corresponding report id and version_id.
@@ -62,17 +61,12 @@ async def save_report(
         "created_at": datetime.datetime.utcnow(),
     }
 
-    # Add optional fields if provided
     if report_title:
         report_doc["report_title"] = report_title
 
     if search_results:
-        # Store search results for revision context
+        # Summary of search results for revision context
         report_doc["search_results"] = search_results
-
-    if report_sections:
-        # Store section metadata (titles, subtopics, etc.)
-        report_doc["report_sections"] = report_sections
 
     result = await reports_collection.insert_one(report_doc)
     print(f"Saved report {report_id} v{version_id} with title='{report_title}' and {len(search_results or {})} search result sets")

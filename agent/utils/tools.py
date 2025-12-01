@@ -1,7 +1,4 @@
-"""
-Tools for report retrieval and re.
-These tools can be called by the agent to fetch reports from the database.
-"""
+# Tools for report retrieval and revision.
 from utils.model import llm, llm_quality
 from langchain_core.messages import SystemMessage, HumanMessage
 from utils.db import save_report
@@ -19,7 +16,7 @@ async def get_report(report_id: str, version_id: int = None) -> dict:
     Retrieve a specific report from the database.
 
     Args:
-        report_id: The unique identifier of the report (e.g., "report_abc123")
+        report_id: The unique identifier of the report (e.g., "abc123")
         version_id: Optional specific version number. If not provided, returns the latest version.
 
     Returns:
@@ -125,7 +122,6 @@ async def list_all_reports(limit: int = 20) -> dict:
             {"$limit": limit}
         ]
 
-        # AsyncMongoClient: await aggregate() to get cursor, then iterate
         cursor = await reports_collection.aggregate(pipeline)
         reports = []
         async for doc in cursor:
@@ -151,6 +147,7 @@ async def list_all_reports(limit: int = 20) -> dict:
             "total_reports": len(report_list),
             "reports": report_list
         }
+
     except Exception as e:
         return {"error": str(e), "reports": []}
 
@@ -200,7 +197,7 @@ async def revise_report(report_id: str, feedback: str, version_id: int = None) -
     {search_results}
 
     **INSTRUCTIONS:**
-    - CRITICAL PRIORITY: Your PRIMARY goal is to address the user's feedback. Make the exact changes they requested.
+    - Your PRIMARY goal is to address the user's feedback. Make the exact changes they requested.
     - If feedback asks to add/remove/change something, DO IT - don't just acknowledge it
     - If feedback says "add X", you MUST add X to the report with proper citations from research context
     - If feedback says "remove Y", you MUST remove Y from the report

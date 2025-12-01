@@ -17,8 +17,11 @@ llm = ChatOpenAI(
 
 # Quality LLM for complex tasks (writing, extraction, planning)
 llm_quality = ChatOpenAI(
-    model="gpt-5.1",
+    model="gpt-4o",  # Fixed: gpt-5.1 doesn't exist, using gpt-4o instead
     api_key=openai_api_key,
+    timeout=120,  # 2 minute timeout for long requests
+    max_retries=3,  # Retry up to 3 times on connection errors
+    request_timeout=120,  # Request-level timeout
 )
 
 # External evaluator LLM (Gemini) for unbiased evaluation
