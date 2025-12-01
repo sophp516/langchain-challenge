@@ -22,7 +22,7 @@ A deep research agent built with LangGraph that accepts user queries and generat
 ```
 User Query
     ↓
-Intent Classification (research vs. report retrieval)
+Intent Classification (research vs. report retrieval/revision)
     ↓
 [If Research]
     ↓
@@ -50,8 +50,8 @@ Return Formatted Results
 
 ## Prerequisites
 
-- **Python 3.9+**
-- **Node.js 18+**
+- **Python+**
+- **Node.js**
 - **MongoDB** (local instance or Atlas connection string)
 - **API Keys**:
   - `TAVILY_API_KEY` (or `EXA_API_KEY`) - Web search API
@@ -73,19 +73,15 @@ This mode runs each service locally. It provides the option to run the agent dir
    cd agent
    pip install -r requirements.txt
    cp .env.example .env
-   # Edit .env and add your API keys:
-   # - TAVILY_API_KEY=your_key
-   # - EXA_API_KEY=your_key (optional)
-   # - OPENAI_API_KEY=your_key
-   # - MONGODB_URI=your_mongodb_connection_string
+   # Edit .env and add your actual API keys and MongoDB URI
    ```
 
 2. **Backend Setup**:
    ```bash
    cd backend
    npm install
-   echo "MONGODB_URI=your_mongodb_connection_string" > .env
-   echo "PORT=3001" >> .env
+   cp .env.example .env
+   # Edit .env and add your MongoDB URI
    ```
 
 3. **UI Setup**:
