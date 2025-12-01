@@ -17,8 +17,10 @@ class UnifiedAgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
     # Intent routing
-    user_intent: str  # "new_research", "retrieve_report", or "list_reports"
+    user_intent: str  # "new_research", "retrieve_report", "list_reports", or "revise_report"
     intent_report_id: str  # Extracted report ID from user query
+    intent_version_id: int  # Optional version_id for get_report, list_report_versions, revise_report
+    intent_feedback: str  # Optional feedback text for revise_report
 
     # Topic inquiry
     report_id: str

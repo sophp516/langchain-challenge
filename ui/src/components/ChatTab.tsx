@@ -4,7 +4,9 @@ import { Send, Loader2, Plus } from "lucide-react"
 import ReactMarkdown from 'react-markdown'
 import { createThread as createThreadInDb, appendMessage } from '../services/db'
 import type { AgentConfig } from './SettingsModal'
+import { convertReferencesToLinks } from '../services/formatter'
 import './ChatTab.css'
+
 
 interface Message {
   id: string
@@ -14,7 +16,6 @@ interface Message {
 }
 
 
-// Lazy initialization - only create client when needed
 let client: Client | null = null
 const getClient = () => {
   const apiUrl = import.meta.env.VITE_API_URL
@@ -98,9 +99,6 @@ function ChatTab({ agentConfig }: ChatTabProps) {
     }
     setIsLoading(true)
 
-    // Don't reset the counter for new threads, only for completely new conversations
-    // The counter tracks total messages from backend across all interactions in this thread
-
     try {
       const client = getClient()
 
@@ -148,8 +146,8 @@ function ChatTab({ agentConfig }: ChatTabProps) {
       } else {
         // Start new run
         const input = {
-          topic: userInput,
-          messages: [],
+          topic: 'userInput',
+          messages: [{ type: 'human', content: userInput }],
           is_finalized: false,
           clarification_rounds: 0,
           clarification_questions: [],
@@ -168,10 +166,6 @@ function ChatTab({ agentConfig }: ChatTabProps) {
           report_citations: [],
           report_footnotes: [],
           report_endnotes: [],
-          scores: {},
-          revision_count: 0,
-          final_score: 0,
-          evaluator_feedback: ''
         }
 
         streamIterator = client.runs.stream(
@@ -300,7 +294,15 @@ function ChatTab({ agentConfig }: ChatTabProps) {
             </div>
             <div className="message-content">
               {message.content ? (
-                <ReactMarkdown>{message.content}</ReactMarkdown>
+                <ReactMarkdown
+                  components={{
+                    a: ({ node, ...props }) => (
+                      <a {...props} target="_blank" rel="noopener noreferrer" />
+                    ),
+                  }}
+                >
+                  {convertReferencesToLinks(message.content)}
+                </ReactMarkdown>
               ) : (
                 <div className="loading">
                   <div className="typing-indicator">

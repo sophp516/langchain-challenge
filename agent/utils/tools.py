@@ -2,7 +2,7 @@
 Tools for report retrieval and re.
 These tools can be called by the agent to fetch reports from the database.
 """
-from utils.model import llm
+from utils.model import llm, llm_quality
 from langchain_core.messages import SystemMessage, HumanMessage
 from utils.db import save_report
 from langchain_core.tools import tool
@@ -120,7 +120,7 @@ async def list_all_reports(limit: int = 20) -> dict:
                 "_id": "$report_id",
                 "latest_version": {"$first": "$version_id"},
                 "created_at": {"$first": "$created_at"},
-                "content_preview": {"$first": {"$substr": ["$content", 0, 200]}}
+                "content": {"$first": "$content"}  # Get full content, truncate in Python
             }},
             {"$limit": limit}
         ]
@@ -129,6 +129,10 @@ async def list_all_reports(limit: int = 20) -> dict:
         cursor = await reports_collection.aggregate(pipeline)
         reports = []
         async for doc in cursor:
+            # Truncate content preview safely in Python (handles UTF-8 correctly)
+            content = doc.get("content", "")
+            doc["content_preview"] = content[:200] if content else ""
+            del doc["content"]  # Remove full content, keep only preview
             reports.append(doc)
             if len(reports) >= limit:
                 break
@@ -181,43 +185,29 @@ async def revise_report(report_id: str, feedback: str, version_id: int = None) -
 
     # Extract data from report
     current_content = report.get("content", "")
-    current_research_context = report.get("search_results", "")
     search_results = report.get("search_results", [])
-
-    # Build research context from search results
-    research_context = ""
-    if search_results:
-        research_context = "\n\n## ORIGINAL RESEARCH DATA (use this to improve the report):\n\n"
-        for idx, researcher in enumerate(search_results[:5]):  # Top 5 sections
-            subtopic = researcher.get("subtopic", f"Section {idx+1}")
-            results = researcher.get("research_results", {})
-            credibilities = researcher.get("source_credibilities", {})
-
-            research_context += f"### Research for '{subtopic}':\n"
-
-            # Add top sources from this section
-            for source, content in list(results.items())[:5]:  # Top 5 sources per section
-                cred = credibilities.get(source, 0.5)
-                research_context += f"\n**Source** (credibility: {cred:.2f}): {source}\n{content[:500]}...\n"
-
 
     revision_prompt = f"""
     You are revising a research report based on user feedback.
 
     **CURRENT REPORT:**
-    {current_content[:8000]}
+    {current_content}
 
     **USER FEEDBACK:**
     {feedback}
     
     **RESEARCH CONTEXT:**
-    {current_research_context}
+    {search_results}
 
     **INSTRUCTIONS:**
-    - Address the user's feedback while maintaining report quality and coherence
-    - Use the ORIGINAL RESEARCH DATA above to add new information if needed
+    - CRITICAL PRIORITY: Your PRIMARY goal is to address the user's feedback. Make the exact changes they requested.
+    - If feedback asks to add/remove/change something, DO IT - don't just acknowledge it
+    - If feedback says "add X", you MUST add X to the report with proper citations from research context
+    - If feedback says "remove Y", you MUST remove Y from the report
+    - If feedback says "expand Z", you MUST expand Z with more detail from research context
+    - Use the RESEARCH CONTEXT above to support any additions or expansions
     - Keep all existing citations intact and add new ones where appropriate
-    - Maintain the existing structure and section organization
+    - Only maintain existing structure if feedback doesn't request structural changes
     - Ensure the revised report is well-written, clear, and comprehensive
 
     **CRITICAL - STANDALONE REPORT REQUIREMENTS:**
@@ -247,7 +237,7 @@ async def revise_report(report_id: str, feedback: str, version_id: int = None) -
         HumanMessage(content=revision_prompt)
     ]
 
-    response = await llm.ainvoke(messages)
+    response = await llm_quality.ainvoke(messages)
     revised_content = response.content if hasattr(response, 'content') else str(response)
 
     new_version_id = version_id + 1

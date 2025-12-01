@@ -2,24 +2,10 @@ import { useState, useEffect } from 'react'
 import { getAllThreads, fetchThreadMessages, deleteThread } from '../services/db'
 import type { ThreadData, Message as ThreadMessage } from '../services/db'
 import { Loader2, Trash2 } from 'lucide-react'
+import { convertReferencesToLinks } from '../services/formatter'
 import ReactMarkdown from 'react-markdown'
 import './MonitoringTab.css'
 
-/**
- * Convert reference format [1] Title (URL) to markdown links [1] [Title](URL)
- */
-function convertReferencesToLinks(content: string): string {
-  // Pattern: [number] Title (URL)
-  // Convert to: [number] [Title](URL)
-  const referencePattern = /\[(\d+)\]\s+([^(]+?)\s+\(([^)]+)\)/g
-  
-  return content.replace(referencePattern, (_match, number, title, url) => {
-    // Trim whitespace from title
-    const trimmedTitle = title.trim()
-    // Return as markdown link
-    return `[${number}] [${trimmedTitle}](${url})`
-  })
-}
 
 function MonitoringTab() {
   const [threads, setThreads] = useState<ThreadData[]>([])
@@ -165,7 +151,15 @@ function MonitoringTab() {
                           <span className="message-role">{message.role === 'user' ? 'User' : 'Agent'}</span>
                         </div>
                         <div className="message-content">
-                          <ReactMarkdown>{convertReferencesToLinks(message.content)}</ReactMarkdown>
+                          <ReactMarkdown
+                            components={{
+                              a: ({ node, ...props }) => (
+                                <a {...props} target="_blank" rel="noopener noreferrer" />
+                              ),
+                            }}
+                          >
+                            {convertReferencesToLinks(message.content)}
+                          </ReactMarkdown>
                         </div>
                       </div>
                     ))}

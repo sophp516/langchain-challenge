@@ -7,7 +7,7 @@ langgraph-cli[inmem]
 langgraph
 pydantic
 tavily-python
-perplexityai
+exa-py
 grandalf
 pymongo
 pymongo[srv]

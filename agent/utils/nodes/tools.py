@@ -55,13 +55,13 @@ async def call_report_tools(state: dict) -> dict:
 
 async def execute_and_format_tools(state: dict) -> dict:
     """
-    OPTIMIZED: Creates tool call, executes it, and formats response in one node.
+    Creates tool call, executes it, and formats response in one node.
     Replaces call_report_tools + execute_and_format_tools for ~50ms latency reduction.
     """
     intent = state.get("user_intent", "")
     report_id = state.get("intent_report_id", "")
-    topic = state.get("topic", "")
-    messages = state.get("messages", [])
+    version_id = state.get("intent_version_id", "")
+    feedback = state.get("feedback", "")
 
     # Create tool call directly based on intent (same logic as call_report_tools)
     tool_calls = []
@@ -88,24 +88,6 @@ async def execute_and_format_tools(state: dict) -> dict:
                 "messages": [AIMessage(content="Please provide a report ID to revise. Example: revise report_abc123 with feedback...")]
             }
 
-        # Extract feedback from user's message
-        # Get the original query from topic or last HumanMessage
-        user_query = topic
-        if not user_query and messages:
-            for msg in reversed(messages):
-                if isinstance(msg, HumanMessage):
-                    user_query = msg.content
-                    break
-
-        # Extract feedback by removing the report_id and command words
-        feedback = user_query
-        for keyword in ["revise", "update", "modify", "improve", "change", "edit", "report", report_id]:
-            feedback = feedback.replace(keyword, "")
-        feedback = feedback.strip().lstrip("with").strip()
-
-        if not feedback:
-            feedback = "Please improve the report quality and add more details."
-
         tool_calls = [{
             "name": "revise_report",
             "args": {"report_id": report_id, "feedback": feedback},
@@ -125,7 +107,6 @@ async def execute_and_format_tools(state: dict) -> dict:
     merged_state = {**temp_state, **tool_result}
     messages = merged_state.get("messages", [])
 
-    # Step 2: Format the tool response
     tool_result_data = None
     for msg in reversed(messages):
         if isinstance(msg, ToolMessage):
@@ -156,8 +137,6 @@ async def execute_and_format_tools(state: dict) -> dict:
             state_updates["report_content"] = content
             state_updates["report_id"] = report_id
             state_updates["version_id"] = version_id
-            state_updates["last_viewed_report_id"] = report_id  # Track context
-            state_updates["last_action"] = "revised_report"
 
             response_text = f"""## ✏️ Revised Report: {report_id}
 
@@ -177,8 +156,6 @@ async def execute_and_format_tools(state: dict) -> dict:
             state_updates["report_content"] = content
             state_updates["report_id"] = report_id
             state_updates["version_id"] = version_id
-            state_updates["last_viewed_report_id"] = report_id  # Track context
-            state_updates["last_action"] = "viewed_report"
 
             response_text = f"""## 📄 Report: {report_id}
 

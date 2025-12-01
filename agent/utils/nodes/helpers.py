@@ -1,9 +1,5 @@
-from langchain_core.messages import SystemMessage, HumanMessage
-from utils.model import llm_quality, llm, evaluator_llm
-from utils.configuration import get_config_from_configurable
 from typing import Dict, List, Tuple
 from urllib.parse import urlparse
-from langgraph.types import RunnableConfig
 import re
 
 # Trusted domains for credibility scoring
@@ -136,53 +132,3 @@ async def filter_quality_sources(
     filtered_results.sort(key=lambda x: x[1], reverse=True)
 
     return filtered_results
-
-
-
-async def evaluate_report(state: dict, config: RunnableConfig) -> dict:
-    """
-    Evaluate a report based on content quality, structure, and evidence
-    Provides detailed feedback for potential improvements
-    """
-    # Get agent configuration
-    agent_config = get_config_from_configurable(config.get("configurable", {}))
-
-    report_content = state.get("report_content", "")
-    current_report_id = state.get("current_report_id", 0)
-    topic = state.get("topic", "")
-
-    print(f"evaluate_report: starting for report_id={current_report_id}")
-
-    evaluation_prompt = f"""
-    You are an expert research report evaluator. Evaluate the following report on: {topic}
-
-    Report:
-    {report_content[:5000]}  # Limit for token management
-
-    Evaluate based on:
-    1. **Coverage** (0-25): Does it comprehensively cover the topic?
-    2. **Evidence** (0-25): Are claims well-supported with sources?
-    3. **Structure** (0-25): Is it well-organized and logical?
-    4. **Clarity** (0-25): Is it clear and well-written?
-
-    Provide your evaluation in this exact format:
-    COVERAGE: [score]/25
-    EVIDENCE: [score]/25
-    STRUCTURE: [score]/25
-    CLARITY: [score]/25
-    TOTAL: [sum of above]/100
-    FEEDBACK: [One paragraph of constructive feedback on what could be improved]
-    """
-
-    messages = [
-        SystemMessage(content="You are an expert research report evaluator that provides detailed, constructive feedback. Be strict but fair in your scoring."),
-        HumanMessage(content=evaluation_prompt)
-    ]
-
-    response = await evaluator_llm.ainvoke(messages)
-    response_text = response.content if hasattr(response, 'content') else str(response)
-
-    # DEBUG: Log the full response to understand Gemini's format
-    print(f"evaluate_report: FULL EVALUATOR RESPONSE:\n{response_text}\n---END RESPONSE---")
-
-    return { **state }
