@@ -4,48 +4,9 @@ import { Send, Loader2, Plus } from "lucide-react"
 import ReactMarkdown from 'react-markdown'
 import { createThread as createThreadInDb, appendMessage } from '../services/db'
 import type { AgentConfig } from './SettingsModal'
+import { convertReferencesToLinks } from '../services/formatter'
 import './ChatTab.css'
 
-/**
- * Make URLs in references clickable without changing the citation format.
- * Only converts URLs to markdown links, preserving the original citation text.
- */
-function convertReferencesToLinks(content: string): string {
-  // Find all URLs and make them clickable
-  // Skip URLs that are already in markdown link format [text](url)
-  const urlPattern = /(https?:\/\/[^\s\)\n]+)/g
-  let lastIndex = 0
-  let result = ''
-  
-  let match
-  while ((match = urlPattern.exec(content)) !== null) {
-    const url = match[0]
-    const matchStart = match.index
-    const matchEnd = matchStart + url.length
-    
-    // Add text before the URL
-    result += content.substring(lastIndex, matchStart)
-    
-    // Check if URL is already part of a markdown link
-    const before = content.substring(Math.max(0, matchStart - 2), matchStart)
-    const after = content.substring(matchEnd, matchEnd + 1)
-    
-    // If URL is already in a markdown link (preceded by ]( or followed by )), don't convert
-    if (before === '](' || after === ')') {
-      result += url
-    } else {
-      // Make URL clickable
-      result += `[${url}](${url})`
-    }
-    
-    lastIndex = matchEnd
-  }
-  
-  // Add remaining text
-  result += content.substring(lastIndex)
-  
-  return result
-}
 
 interface Message {
   id: string
@@ -138,9 +99,6 @@ function ChatTab({ agentConfig }: ChatTabProps) {
     }
     setIsLoading(true)
 
-    // Don't reset the counter for new threads, only for completely new conversations
-    // The counter tracks total messages from backend across all interactions in this thread
-
     try {
       const client = getClient()
 
@@ -188,7 +146,7 @@ function ChatTab({ agentConfig }: ChatTabProps) {
       } else {
         // Start new run
         const input = {
-          topic: userInput,
+          topic: 'userInput',
           messages: [{ type: 'human', content: userInput }],
           is_finalized: false,
           clarification_rounds: 0,
@@ -208,10 +166,6 @@ function ChatTab({ agentConfig }: ChatTabProps) {
           report_citations: [],
           report_footnotes: [],
           report_endnotes: [],
-          scores: {},
-          revision_count: 0,
-          final_score: 0,
-          evaluator_feedback: ''
         }
 
         streamIterator = client.runs.stream(

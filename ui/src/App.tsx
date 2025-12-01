@@ -13,9 +13,6 @@ const defaultConfig: AgentConfig = {
   max_subtopics: 7,
   max_clarification_rounds: 0,
   min_credibility_score: 0.3,
-  // UI-only defaults
-  enable_user_feedback: true,
-  enable_cross_verification: false
 }
 
 function App() {

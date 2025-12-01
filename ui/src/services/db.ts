@@ -156,7 +156,7 @@ export async function saveMessage(
 }
 
 /**
- * Get all threads (optional - if you want to list threads)
+ * Get all threads
  */
 export async function getAllThreads(): Promise<ThreadData[]> {
   try {

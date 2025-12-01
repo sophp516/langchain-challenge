@@ -243,8 +243,6 @@ Provide a balanced, thorough analysis. Be as comprehensive as possible, and incl
 
 **CRITICAL: LANGUAGE REQUIREMENT**
 The main topic below is written in a specific language. You MUST write your ENTIRE report in the SAME language as the main topic.
-If the topic is in Chinese (中文), write the entire report in Chinese.
-If the topic is in English, write the entire report in English.
 Match the topic's language EXACTLY. This is MANDATORY.
 
 **MAIN TOPIC**: {topic}
@@ -257,7 +255,6 @@ Match the topic's language EXACTLY. This is MANDATORY.
 1. **SOURCE FIDELITY & CITATION DISCIPLINE***:
    - ONLY use information EXPLICITLY in the sources above - NO general knowledge
    - EVERY factual sentence MUST end with citations [1], [2], etc.
-   - Assign each source/url a single citation number in your tex
    - End with ### Sources that lists each source with corresponding numbers
    - IMPORTANT: Number sources sequentially without gaps (1,2,3,4...) in the final list regardless of which sources you choose
    - Example format:
@@ -273,7 +270,7 @@ Match the topic's language EXACTLY. This is MANDATORY.
    - Structure: 5-7 major sections (##), each with 3-5 subsections (###)
 
 3. **DETAILED, SPECIFIC CONTENT**:
-   - Include ALL specifics: named entities, exact numbers, dates, percentages, methodologies
+   - Include specifics: named entities, exact numbers, dates, percentages, methodologies
    - Use 10 sentences per paragraph MINIMUM
    - Never use vague terms ("increased significantly") - use exact data with context
    - Example: Instead of "AI improves communication [1]" → "Research by Smith et al. (2023) found AI-powered translation tools increased cross-cultural communication efficiency by 47% among multinational teams, with technical documentation translation reaching 89% accuracy and real-time video interpretation 76% accuracy [1]"
@@ -281,7 +278,6 @@ Match the topic's language EXACTLY. This is MANDATORY.
 4. **QUALITY STANDARDS**:
    - Write in same language as topic using clear, academic style
    - Use topic sentences and transition paragraphs to build progressive arguments
-   - Before submitting: verify 600+ words per section, 1 citation per sentence average, zero unsupported claims
 
 Return in 'content' field: Complete markdown report WITHOUT title or References section. Start with first ## section.
 Return in 'report_title' field: Clear, professional title.
