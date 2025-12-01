@@ -39,7 +39,7 @@ class AgentConfig(BaseModel):
     )
 
     max_clarification_rounds: int = Field(
-        default=0,
+        default=2,
         ge=0,
         le=10,
         description="Maximum number of clarification questions (0-10)"

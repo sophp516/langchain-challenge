@@ -21,7 +21,7 @@ def route_after_intent_check(state: dict) -> str:
 
 def should_continue_tools(state: dict) -> str:
     """
-    Check if the last message has tool calls that need execution.
+    Conditional edge: Check if the last message has tool calls that need execution.
     """
     messages = state.get("messages", [])
     if not messages:
@@ -75,7 +75,7 @@ def route_after_display_report(state: dict, config: RunnableConfig) -> str:
 
 def route_after_feedback(state: dict) -> str:
     """
-    Route after collecting user feedback.
+    Conditional edge: Route after collecting user feedback.
     - If all feedback is incorporated: continue to end
     - If any feedback needs incorporation: incorporate feedback
     """

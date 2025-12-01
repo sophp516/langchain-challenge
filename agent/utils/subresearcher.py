@@ -13,13 +13,12 @@ from urllib.parse import urlparse
 
 
 class SubResearcherGraphState(TypedDict):
-    # State for the subresearcher subgraph with iterative deepening
+
     subtopic_id: int
     subtopic: str  # The broad query
     main_topic: str
     other_subtopics: list[str]
 
-    # Section-specific research guidance
     section_subtopics: list[str]  # Specific subtopics from research plan
 
     # Final outputs
@@ -35,13 +34,12 @@ class SubResearcherGraphState(TypedDict):
     search_api: str
 
     # Internal state for iterative deepening
-    entities: list[str]  # Extracted entities to research
-    research_plan: list[dict]  # Planned searches based on subtopics/questions
-    completed_searches: int  # Track progress
-    discovered_gaps: list[str]  # Knowledge gaps found during research
-    discovered_entities: list[str]  # New entities/topics discovered in results
-    coverage_score: float  # Estimated coverage of the topic (0.0-1.0)
-    needs_deepening: bool  # Flag to trigger additional research round
+    entities: list[str]
+    research_plan: list[dict]
+    discovered_gaps: list[str]
+    discovered_entities: list[str]
+    coverage_score: float
+    needs_deepening: bool
 
     # Shared entities and findings from other sections
     shared_research_pool: dict
@@ -49,10 +47,8 @@ class SubResearcherGraphState(TypedDict):
 
 def quick_domain_quality_score(url: str) -> float:
     """
-    Quick domain-based quality assessment without LLM.
+    Quick, cheap domain-based quality assessment without LLM.
     Returns a score from 0.0 (low quality) to 1.0 (high quality).
-
-    This enables early filtering before expensive API calls.
     """
     try:
         parsed = urlparse(url)
@@ -82,22 +78,19 @@ def quick_domain_quality_score(url: str) -> float:
             'ads', 'promo', 'sale', 'buy'
         ]
 
-        # Check high quality
         for pattern in high_quality_patterns:
             if pattern in domain:
                 return 0.9
 
-        # Check medium quality
         for pattern in medium_quality_patterns:
             if pattern in domain:
                 return 0.6
 
-        # Check low quality
         for pattern in low_quality_patterns:
             if pattern in domain or pattern in url.lower():
                 return 0.2
 
-        # Default: neutral quality
+        # Default to neutral quality
         return 0.5
 
     except Exception:
@@ -108,13 +101,6 @@ def filter_results_by_domain_quality(results: list[dict], min_score: float = 0.3
     """
     Filter search results by domain quality before deep processing.
     Removes low-quality domains early to save API quota.
-
-    Args:
-        results: List of search results with 'url' field
-        min_score: Minimum quality score to keep (0.0-1.0)
-
-    Returns:
-        Filtered list of results
     """
     filtered = []
     for result in results:
@@ -137,17 +123,8 @@ async def parallel_search_with_rate_limit(
 ) -> list[tuple[str, list[dict]]]:
     """
     Execute multiple search queries in parallel with rate limiting.
-
-    Args:
-        queries: List of (query_string, metadata) tuples
-        search_api: "tavily" or "exa"
-        max_results: Max results per query
-        max_concurrent: Max concurrent searches (default 2 for rate limits)
-
-    Returns:
-        List of (query_string, results_list) tuples
     """
-    # Exa has stricter rate limits (5 req/sec), so reduce concurrency further
+    # Exa has stricter rate limits (5 req/sec) -> Reduce concurrency further
     if search_api == "exa":
         max_concurrent = 1  # Only 1 concurrent request for Exa
 
@@ -205,7 +182,6 @@ async def parallel_search_with_rate_limit(
                                 for r in search_results.results
                             ][:max_results]
 
-                        # Success - return results
                         return (query, results_list, metadata)
 
                     except Exception as e:
@@ -221,7 +197,7 @@ async def parallel_search_with_rate_limit(
                                 print(f"    Search failed for '{query[:60]}...': {e} (max retries exceeded)")
                                 return (query, [], metadata)
                         else:
-                            # Non-rate-limit error, don't retry
+                            # Non-rate-limit error
                             print(f"    Search failed for '{query[:60]}...': {e}")
                             return (query, [], metadata)
 
@@ -234,95 +210,6 @@ async def parallel_search_with_rate_limit(
 
     return results
 
-
-# ============================================================================
-# SEARCH HELPER FUNCTIONS
-# ============================================================================
-
-async def _search_single_entity(entity: str, main_topic: str, search_api: str, max_results: int) -> list[dict]:
-    """Execute a single entity search with rate limiting and error handling."""
-    query = entity
-    await asyncio.sleep(1.5)  # Rate limiting
-
-    try:
-        loop = asyncio.get_event_loop()
-
-        if search_api == "tavily":
-            results = await loop.run_in_executor(
-                None,
-                lambda: tavily_client.search(query=query, max_results=max_results)
-            )
-            await asyncio.sleep(0.5)
-            return results.get("results", [])[:max_results]
-
-        elif search_api == "exa":
-            results = await loop.run_in_executor(
-                None,
-                lambda: exa_client.search_and_contents(query, text=True, type="auto", num_results=max_results)
-            )
-            await asyncio.sleep(0.5)
-            # Exa returns SearchResponse object with .results attribute
-            return [
-                {
-                    "url": r.url,
-                    "title": r.title,
-                    "content": r.text,
-                    "score": r.score if hasattr(r, 'score') else 0.0
-                }
-                for r in results.results
-            ][:max_results]
-
-    except Exception as e:
-        error_str = str(e).lower()
-        if "rate" in error_str or "excessive" in error_str or "blocked" in error_str:
-            print(f"[Deep research]   - Search rate limited for {entity}, waiting...")
-            await asyncio.sleep(5.0)
-        print(f"[Deep research]   - Search failed for {entity}: {e}")
-        return []
-
-    return []
-
-
-async def _research_single_entity(entity: str, main_topic: str, search_api: str, max_results: int) -> dict[str, str]:
-    """Research a single entity and return results as dict."""
-    print(f"[Deep research]   - {entity}")
-
-    results = await _search_single_entity(entity, main_topic, search_api, max_results)
-
-    # Convert to dict
-    entity_results = {}
-    for result in results:
-        source_url = result.get("url", "")
-        source_title = result.get("title", "Untitled")
-        source_content = result.get("content", "")
-
-        if source_content:
-            source_key = f"{source_title} ({source_url})"
-            entity_results[source_key] = source_content
-
-    print(f"[Deep research]   - {entity}: found {len(entity_results)} sources")
-    return entity_results
-
-
-def _convert_results_to_dict(results: list[dict]) -> dict[str, str]:
-    """Convert search results list to dict with source_key -> content mapping."""
-    results_dict = {}
-    for result in results:
-        source_url = result.get("url", "")
-        source_title = result.get("title", "Untitled")
-        source_content = result.get("content", "")
-
-        if source_content:
-            source_key = f"{source_title} ({source_url})" if source_url else source_title
-            results_dict[source_key] = source_content
-
-    return results_dict
-
-
-
-# ============================================================================
-# ITERATIVE DEEPENING NODES
-# ============================================================================
 
 async def execute_research(state: SubResearcherGraphState) -> dict:
     """
@@ -365,7 +252,6 @@ async def execute_research(state: SubResearcherGraphState) -> dict:
     # Execute uncached searches in parallel
     search_results = []
     if queries_with_meta:
-        print(f"[RESEARCH] Executing {len(queries_with_meta)} new searches...")
         search_results = await parallel_search_with_rate_limit(
             queries=queries_with_meta,
             search_api=search_api,
@@ -448,67 +334,9 @@ async def execute_research(state: SubResearcherGraphState) -> dict:
     return update_dict
 
 
-async def deep_research_entities(state: SubResearcherGraphState) -> dict:
-    """
-    Deep research on each extracted entity using unified search.
-    Combines with initial results.
-    """
-    entities = state.get("entities", [])
-    main_topic = state.get("main_topic", "")
-    search_api = state.get("search_api", "tavily")
-    max_results = state.get("max_search_results", 5)
-    initial_results = state.get("research_results", {})
-
-    if not entities:
-        print(f"[Deep research] No entities to research, keeping initial results")
-        return {}
-
-    print(f"[Deep research] Deep research on {len(entities)} entities...")
-
-
-    # Limit to 2 entities at a time to avoid rate limits
-    entity_semaphore = asyncio.Semaphore(2)
-
-    async def throttled_research(entity: str):
-        async with entity_semaphore:
-            return await _research_single_entity(entity, main_topic, search_api, max_results)
-
-    tasks = [throttled_research(entity) for entity in entities]
-    all_entity_results = await asyncio.gather(*tasks)
-
-    # Combine all results (initial + entity research) with relevance tracking
-    combined_results = {**initial_results}
-    combined_relevance = state.get("source_relevance_scores", {}).copy()
-
-    for entity_idx, entity_results in enumerate(all_entity_results):
-        for source_key, content in entity_results.items():
-            combined_results[source_key] = content
-            # Deep research sources: relevance based on entity order (earlier entities = more important)
-            if source_key not in combined_relevance:
-                combined_relevance[source_key] = 0.7 - (entity_idx * 0.1)
-
-    print(f"[Deep research] Combined total: {len(combined_results)} sources")
-
-    # Print sample of deep research findings
-    if all_entity_results:
-        print(f"[Deep research] Deep research sample findings:")
-        for idx, entity_results in enumerate(all_entity_results[:2]):
-            entity_name = entities[idx] if idx < len(entities) else "Unknown"
-            if entity_results:
-                sample_key = list(entity_results.keys())[0]
-                content_preview = entity_results[sample_key][:150].replace('\n', ' ')
-                print(f"    Entity '{entity_name}': {len(entity_results)} sources | Sample: {content_preview}...")
-
-    return {
-        "research_results": combined_results,
-        "source_relevance_scores": combined_relevance,
-        "research_depth": 2
-    }
-
-
 async def assess_coverage_and_gaps(state: SubResearcherGraphState) -> dict:
     """
-    DYNAMIC DEEPENING: Analyze research coverage and discover gaps/entities.
+    Analyze research coverage and discover gaps/entities.
 
     After initial research, this node:
     1. Extracts entities/topics mentioned in results
@@ -660,9 +488,7 @@ Return structured output.
 
 async def deep_dive_research(state: SubResearcherGraphState) -> dict:
     """
-    DYNAMIC DEEPENING: Execute additional research based on discovered gaps/entities.
-
-    This runs AFTER assess_coverage_and_gaps and performs targeted searches for:
+    This runs AFTER assess_coverage_and_gaps and performs searches for:
     1. Discovered entities (specific items that need investigation)
     2. Knowledge gaps (unanswered questions)
 
@@ -672,7 +498,6 @@ async def deep_dive_research(state: SubResearcherGraphState) -> dict:
     knowledge_gaps = state.get("discovered_gaps", [])
     search_api = state.get("search_api", "tavily")
     max_results = state.get("max_search_results", 3)
-    main_topic = state.get("main_topic", "")
     shared_pool = state.get("shared_research_pool", {})
     research_plan = state.get("research_plan", [])
 
@@ -680,7 +505,7 @@ async def deep_dive_research(state: SubResearcherGraphState) -> dict:
         print(f"[DEEP DIVE] No gaps or entities to research")
         return {}
 
-    # DEDUPLICATION #1: Check shared pool for entities already researched by other sections
+    # Check shared pool for entities already researched by other sections
     already_researched = shared_pool.get("researched_entities", {})
     new_entities = []
     reused_entities = []
@@ -747,14 +572,11 @@ async def deep_dive_research(state: SubResearcherGraphState) -> dict:
     queries_with_meta = []
 
     for entity in discovered_entities:
-        # Create more specific query that focuses on the comparison aspect
-        query = f"{entity} {main_topic}"
-        queries_with_meta.append((query, {"type": "entity", "subject": entity, "priority": "high"}))
+        queries_with_meta.append((entity, {"type": "entity", "subject": entity, "priority": "high"}))
 
     # Add gap-filling queries - ensure they're search-friendly
     for gap in knowledge_gaps:
-        query = f"{gap} {main_topic}"
-        queries_with_meta.append((query, {"type": "gap", "subject": gap, "priority": "medium"}))
+        queries_with_meta.append((gap, {"type": "gap", "subject": gap, "priority": "medium"}))
 
     search_results = await parallel_search_with_rate_limit(
         queries=queries_with_meta,
@@ -769,7 +591,6 @@ async def deep_dive_research(state: SubResearcherGraphState) -> dict:
 
     for query, results_list, metadata in search_results:
         search_type = metadata.get("type", "unknown")
-        priority = metadata.get("priority", "medium")
         subject = metadata.get("subject", "")[:30]
 
         print(f"  [{search_type.upper()}] {subject}... → {len(results_list)} results")
@@ -802,72 +623,6 @@ async def deep_dive_research(state: SubResearcherGraphState) -> dict:
         "source_relevance_scores": relevance_scores,
         "research_depth": state.get("research_depth", 1) + 1,  # Increment depth
         "entities": []  # Clear entities to avoid legacy entity research
-    }
-
-
-async def assess_quality(state: SubResearcherGraphState) -> dict:
-    """
-    Final step: Assess quality and assign credibility scores to sources.
-    """
-    research_results = state.get("research_results", {})
-
-
-    if not research_results:
-        print(f"[Subresearcher] No results to assess")
-        return {
-            "source_credibilities": {}
-        }
-
-    print(f"[Subresearcher] Assessing quality of {len(research_results)} sources...")
-
-    # Convert dict to list format for quality filter
-    search_results_list = []
-    for source_key, content in research_results.items():
-        # Parse source_key which is in format "Title (URL)"
-        if '(' in source_key and ')' in source_key:
-            title = source_key.split('(')[0].strip()
-            url = source_key.split('(')[1].split(')')[0]
-        else:
-            title = source_key
-            url = ""
-
-        search_results_list.append({
-            "url": url,
-            "title": title,
-            "content": content
-        })
-
-    # Use existing quality filter
-    filtered = await filter_quality_sources(
-        search_results=search_results_list,
-        min_credibility=0.
-    )
-
-    credibilities = {}
-    filtered_results = {}
-
-    for result, credibility in filtered:
-        # Reconstruct source_key
-        title = result.get("title", "")
-        url = result.get("url", "")
-        content = result.get("content", "")
-        source_key = f"{title} ({url})" if url else title
-
-        credibilities[source_key] = credibility
-        filtered_results[source_key] = content
-
-    print(f"[Subresearcher] Quality assessment complete: {len(filtered_results)} sources passed")
-
-    # Show credibility distribution
-    if credibilities:
-        high_quality = sum(1 for c in credibilities.values() if c >= 0.7)
-        medium_quality = sum(1 for c in credibilities.values() if 0.5 <= c < 0.7)
-        low_quality = sum(1 for c in credibilities.values() if c < 0.5)
-        print(f"[Subresearcher] Credibility distribution: High (≥0.7)={high_quality}, Medium (0.5-0.7)={medium_quality}, Low (<0.5)={low_quality}")
-
-    return {
-        "research_results": filtered_results,
-        "source_credibilities": credibilities
     }
 
 
@@ -1003,10 +758,6 @@ Return the complete organized report with inline citations using [srcX] format.
         }
 
 
-# ============================================================================
-# GRAPH CREATION
-# ============================================================================
-
 def should_deepen_research(state: SubResearcherGraphState) -> str:
     """
     Routing function: Decide if we need another round of deep dive research.
@@ -1042,23 +793,14 @@ def create_subresearcher_graph():
 
     The graph can loop through steps 2-4 multiple times until max_depth is reached
     or coverage is satisfactory.
-
-    IMPROVEMENTS:
-    - Research plan pre-generated during outline creation (saved 1 LLM call per section)
-    - All planned searches run in parallel for maximum efficiency
-    - Iterative deepening based on coverage assessment
-    - Final summarization node organizes findings for writer LLM
     """
     workflow = StateGraph(SubResearcherGraphState)
 
-    # Add nodes
     workflow.add_node("research", execute_research)
     workflow.add_node("assess_coverage", assess_coverage_and_gaps)
     workflow.add_node("deep_dive", deep_dive_research)
-    workflow.add_node("assess_quality", assess_quality)
     workflow.add_node("synthesize", synthesize_findings)
 
-    # Unified research flow - start directly with execution
     workflow.set_entry_point("research")
     workflow.add_edge("research", "assess_coverage")
 
@@ -1068,7 +810,7 @@ def create_subresearcher_graph():
         should_deepen_research,
         {
             "deepen": "deep_dive",      # Coverage low → research more
-            "finish": "assess_quality"  # Coverage good → finish
+            "finish": "synthesize"  # Coverage good → finish
         }
     )
 
@@ -1076,7 +818,6 @@ def create_subresearcher_graph():
     workflow.add_edge("deep_dive", "assess_coverage")
 
     # After quality assessment, summarize findings
-    workflow.add_edge("assess_quality", "synthesize")
     workflow.add_edge("synthesize", END)
 
     return workflow.compile()

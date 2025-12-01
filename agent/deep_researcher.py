@@ -47,7 +47,7 @@ def create_agent(use_checkpointer=False):
         route_after_intent_check,
         {
             "research": "check_initial_context",
-            "tools": "execute_and_format_tools"  # Direct route (no intermediate node)
+            "tools": "execute_and_format_tools" 
         }
     )
 

@@ -1,7 +1,7 @@
 from langgraph.types import RunnableConfig, interrupt
 from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
 from pydantic import create_model
-from utils.model import llm
+from utils.model import llm, llm_quality
 from utils.configuration import get_config_from_configurable
 from typing import Optional
 
@@ -16,9 +16,6 @@ async def check_user_intent(state: dict, config: RunnableConfig) -> dict:
     - "list_reports": User wants to see available reports
     - "revise_report": User wants to revise an existing report
     """
-    # Get agent configuration
-    agent_config = get_config_from_configurable(config.get("configurable", {}))
-
     messages = state.get("messages", [])
 
     # Filter to relevant messages (HumanMessage and AIMessage only, skip ToolMessages)
@@ -27,10 +24,9 @@ async def check_user_intent(state: dict, config: RunnableConfig) -> dict:
         if isinstance(msg, (HumanMessage, AIMessage))
     ][-10:]  # Last 10 messages for context
 
-    # Get the latest user query for logging
     latest_query = messages[-1].content
 
-    print(f"check_user_intent: analyzing query='{latest_query[:50]}...' with {len(conversation_messages)} messages of context")
+    print(f"check_user_intent: analyzing query='{latest_query[:200]}...'")
 
     IntentOutput = create_model(
         'IntentOutput',
