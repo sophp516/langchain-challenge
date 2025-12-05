@@ -627,20 +627,6 @@ async def deep_dive_research(state: SubResearcherGraphState) -> dict:
 
 
 async def synthesize_findings(state: SubResearcherGraphState) -> dict:
-    """
-    CRITICAL REQUIREMENTS:
-    1. Include ALL information from ALL sources (nothing should be lost)
-    2. Organize information thematically for better readability
-    3. Preserve ALL sources with inline citations
-    4. Return a complete report that can be merged with other subtopic reports
-    5. The output should be LONGER and more comprehensive, not shorter
-
-    Benefits:
-    - Better organization for the writer LLM
-    - All key information is extracted and cited
-    - ALL sources are preserved with proper attribution
-    - Ready to be merged into the final report
-    """
     research_results = state.get("research_results", {})
     credibilities = state.get("source_credibilities", {})
     subtopic = state.get("subtopic", "Unknown Subtopic")
